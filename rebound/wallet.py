@@ -1,40 +1,70 @@
-"""Browser-wallet finish page for one ready transfer.
+"""HTTP surface for the browser-wallet adapter.
 
-This is the app's only authored HTML and JavaScript: injected EIP-1193 wallets are
-reachable only from page JavaScript. The page asks the existing API to revalidate and
-prepare the transaction; the user's wallet signs and broadcasts it. No key reaches the server.
+The review and status UI is Flet (rebound/wallet_ui.py). Injected EIP-1193 wallets
+are reachable only from page JavaScript, so this router serves one minimal adapter
+page (a status line plus rebound/wallet_adapter.js) and the four session calls it
+needs. Sessions are created in-process by the Flet UI; there is no public create
+endpoint. No key reaches the server.
 """
 import json
-import re
 import secrets
 from pathlib import Path
+from typing import Literal
 
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import BaseModel, Field
 
 from rebound import protocol as p
+from rebound.wallet_session import (
+    ARC_CHAIN_HEX,
+    MAX_GAS_LIMIT,
+    MAX_NETWORK_FEE_WEI,
+    SessionConflict,
+    SessionNotFound,
+    sessions_for,
+)
 
-ARC_CHAIN_ID = 5042002
 # Offered to wallets that lack Arc Testnet. The server's configured RPC can carry
 # credentials, so it is never sent to browsers.
 ARC_PUBLIC_RPC = "https://rpc.testnet.arc.network"
-BASE_EXPLORER = "https://sepolia.basescan.org"
-LOG_INDEX_PATTERN = re.compile(r"[0-9]{1,6}", re.ASCII)
-MAX_LOG_INDEX = 100_000  # Same bound as PrepareRequest.log_index.
-PAGE = Path(__file__).with_name("wallet.html").read_text(encoding="utf-8")
-FONT = Path(__file__).resolve().parent.parent / "assets" / "fonts" / "Manrope.ttf"
+SCRIPT = Path(__file__).with_name("wallet_adapter.js").read_text(encoding="utf-8")
+PAGE = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rebound wallet connection</title>
+</head>
+<body>
+<p id="status" role="status" aria-live="polite">Rebound is connecting to your wallet. Return to the Rebound tab to review.</p>
+<script nonce="{nonce}">const CONFIG = {config};
+{script}</script>
+</body>
+</html>
+"""
+NO_STORE = {"Cache-Control": "no-store"}
 
 router = APIRouter(include_in_schema=False)
+
+
+class Connected(BaseModel):
+    account: str = Field(pattern=r"^0x[0-9a-fA-F]{40}$")
+    chainId: str = Field(pattern=r"^0x[0-9a-fA-F]{1,16}$")
+
+
+class Outcome(BaseModel):
+    outcome: Literal["submitted", "rejected", "not_sent", "unknown"]
+    hash: str | None = Field(default=None, pattern=r"^0x[0-9a-fA-F]{64}$")
+    code: int | None = None
+    reason: str = Field(default="", max_length=200)
 
 
 def security_headers(nonce: str) -> dict[str, str]:
     policy = "; ".join([
         "default-src 'none'",
         f"script-src 'nonce-{nonce}'",
-        f"style-src 'nonce-{nonce}'",
-        f"connect-src 'self' {ARC_PUBLIC_RPC}",
-        "img-src 'self' data:",
-        "font-src 'self'",
+        "connect-src 'self'",
         "frame-ancestors 'none'",
         "base-uri 'none'",
         "form-action 'none'",
@@ -43,30 +73,70 @@ def security_headers(nonce: str) -> dict[str, str]:
             "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"}
 
 
-def render_page(tx_hash: str, log_index: int, nonce: str) -> str:
+def render_adapter(session_id: str, nonce: str) -> str:
     config = {
-        "txHash": tx_hash, "logIndex": log_index, "transmitter": p.TRANSMITTER,
-        "chainId": ARC_CHAIN_ID, "chainHex": hex(ARC_CHAIN_ID), "selector": "0x" + p.RECEIVE_SELECTOR.hex(),
-        "rpc": ARC_PUBLIC_RPC, "explorer": p.ARC_EXPLORER, "baseExplorer": BASE_EXPLORER,
+        "session": session_id, "transmitter": p.TRANSMITTER, "chainHex": ARC_CHAIN_HEX,
+        "selector": "0x" + p.RECEIVE_SELECTOR.hex(), "rpc": ARC_PUBLIC_RPC, "explorer": p.ARC_EXPLORER,
+        "maxGas": str(MAX_GAS_LIMIT), "maxNetworkFee": str(MAX_NETWORK_FEE_WEI),
     }
-    # Inputs are validated hex, but never let injected data close the script element.
+    # Values are validated, but never let injected data close the script element.
     data = json.dumps(config).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
-    return PAGE.replace("{{NONCE}}", nonce).replace("{{CONFIG}}", data)
+    return PAGE.format(nonce=nonce, config=data, script=SCRIPT)
 
 
-@router.get("/finish/manrope.ttf")
-async def finish_font():
-    return FileResponse(FONT, media_type="font/ttf",
-                        headers={"Cache-Control": "public, max-age=86400", "X-Content-Type-Options": "nosniff"})
+def manager(request: Request):
+    return sessions_for(request.app.state.recovery)
 
 
-@router.get("/finish/{tx_hash}/{log_index}", response_class=HTMLResponse)
-async def finish_page(tx_hash: str, log_index: str):
+def session_or_404(request: Request, session_id: str):
     try:
-        tx_hash = p.hash32(tx_hash)
+        return manager(request).get(session_id)
+    except SessionNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+async def guarded(operation):
+    try:
+        return await operation()
+    except SessionNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except SessionConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    if not LOG_INDEX_PATTERN.fullmatch(log_index) or int(log_index) > MAX_LOG_INDEX:
-        raise HTTPException(400, "Event log index must be a decimal integer from 0 to 100000.")
+
+
+@router.get("/wallet/adapter/{session_id}", response_class=HTMLResponse)
+async def adapter_page(request: Request, session_id: str):
+    session = session_or_404(request, session_id)
     nonce = secrets.token_urlsafe(18)
-    return HTMLResponse(render_page(tx_hash, int(log_index), nonce), headers=security_headers(nonce))
+    return HTMLResponse(render_adapter(session.id, nonce), headers=security_headers(nonce))
+
+
+@router.get("/api/wallet-sessions/{session_id}")
+async def session_state(request: Request, session_id: str):
+    return JSONResponse(session_or_404(request, session_id).adapter_view(), headers=NO_STORE)
+
+
+@router.post("/api/wallet-sessions/{session_id}/connected")
+async def connected(request: Request, session_id: str, payload: Connected):
+    async def run():
+        return await manager(request).connect(session_id, payload.account, payload.chainId)
+    session = await guarded(run)
+    return JSONResponse(session.adapter_view(), headers=NO_STORE)
+
+
+@router.post("/api/wallet-sessions/{session_id}/claim")
+async def claim(request: Request, session_id: str):
+    async def run():
+        return manager(request).claim(session_id)
+    return JSONResponse(await guarded(run), headers=NO_STORE)
+
+
+@router.post("/api/wallet-sessions/{session_id}/result")
+async def result(request: Request, session_id: str, payload: Outcome):
+    async def run():
+        return manager(request).report(session_id, payload.outcome, tx_hash=payload.hash,
+                                       reason=payload.reason, code=payload.code)
+    session = await guarded(run)
+    return JSONResponse(session.adapter_view(), headers=NO_STORE)
