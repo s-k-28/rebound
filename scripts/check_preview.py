@@ -8,18 +8,19 @@ This checks the Flet HTML entry point, not browser rendering or wallet signing.
 import argparse
 import asyncio
 import json
-import re
 import sys
 from collections.abc import Callable
 from urllib.parse import urlsplit
 
 import httpx
 
-SOURCE_TX = "0xcfe897ab891b667c9ae538d9d6713c02db167dfd0a058fc6c09313734de0ecbb"
-ARC_TX = "0xd2f74e876f5f9b48ca5836044d0b1fa9723de30672587aacb86b55be6d5bdb00"
+# Public receipts from the controlled run documented in docs/LIVE-RECOVERY.md.
+SOURCE_TX = "0x7e4334109c120f9da71e01116190804a9d91f2fd5ec07cfd7196a649e68e3f23"
+ARC_TX = "0x92020b4554591c5afc4ae31aff0a8906fc19d1a17f2bd1773e1592762ea0a0a5"
+NONCE = "0xeafbcb86f92955da10623109d1fb9196e5dd2704cfcadc8620f0022f8a5670cd"
 SOURCE_LOG = 4
-PREVIOUS_BLOCK = 73_127_413
-MINT_BLOCK = 73_127_414
+PREVIOUS_BLOCK = 73_147_364
+MINT_BLOCK = 73_147_365
 BODY_LIMIT = 1_000_000
 
 
@@ -105,6 +106,7 @@ def validate_replay(body: bytes, content_type: str) -> str:
         "source_tx_hash": SOURCE_TX,
         "log_index": SOURCE_LOG,
         "arc_tx_hash": ARC_TX,
+        "nonce": NONCE,
         "previous_block": PREVIOUS_BLOCK,
         "mint_block": MINT_BLOCK,
     }
@@ -112,14 +114,7 @@ def validate_replay(body: bytes, content_type: str) -> str:
         type(replay.get(key)) is not type(value) or replay[key] != value
         for key, value in expected.items()
     ):
-        raise CheckFailed("historical replay identifies a different source, mint or block pair")
-    nonce = replay.get("nonce")
-    if (
-        not isinstance(nonce, str)
-        or not re.fullmatch(r"0x[0-9a-fA-F]{64}", nonce)
-        or int(nonce[2:], 16) == 0
-    ):
-        raise CheckFailed("historical replay returned an invalid message nonce")
+        raise CheckFailed("historical replay differs from the controlled run's source, mint, nonce or block pair")
     if (
         replay.get("receive_simulated") is not True
         or replay.get("nonce_used_before") is not False
