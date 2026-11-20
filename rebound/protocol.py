@@ -17,6 +17,7 @@ TRANSMITTER = "0xe737e5cebeeba77efe34d4aa090756590b1ce275"
 USDC = "0x036cbd53842c5426634e7929541ec2318f3dcf7e"
 BURN_TOPIC = "0x" + keccak(text="DepositForBurn(address,uint256,address,bytes32,uint32,bytes32,bytes32,uint256,uint32,bytes)").hex()
 RECEIVED_TOPIC = "0x" + keccak(text="MessageReceived(address,uint32,bytes32,bytes32,uint32,bytes)").hex()
+RECEIVE_SELECTOR = keccak(text="receiveMessage(bytes,bytes)")[:4]
 ARC_EXPLORER = "https://explorer.testnet.arc.io"
 
 
@@ -175,14 +176,11 @@ def decode_burn(log: dict) -> Burn:
         raise ValueError("Malformed burn event.") from exc
 
 
-def validate_match(burn: Burn, message: Message) -> None:
+def validate_message(message: Message) -> None:
     if (message.source_domain, message.destination_domain) != (6, 26):
         raise ValueError("Unsupported source or destination domain.")
     if message.sender != MESSENGER or message.recipient != MESSENGER or message.burn_token != USDC:
         raise ValueError("Message token or messenger does not match the supported route.")
-    for name in ["amount", "mint_recipient", "depositor", "destination_domain", "caller", "max_fee", "min_finality", "hook"]:
-        if getattr(burn, name) != getattr(message, name):
-            raise ValueError(f"Attestation does not match the original burn: {name}.")
     if message.fee > message.max_fee or message.fee >= message.amount:
         raise ValueError("Attested fee exceeds the original allowance.")
     if message.executed_finality < message.min_finality:
@@ -191,6 +189,13 @@ def validate_match(burn: Burn, message: Message) -> None:
         raise ValueError("Transfers with hooks require an adapter and are not supported yet.")
     if message.mint_recipient == ZERO or message.nonce == "0x" + "00" * 32:
         raise ValueError("Invalid zero recipient or nonce.")
+
+
+def validate_match(burn: Burn, message: Message) -> None:
+    validate_message(message)
+    for name in ["amount", "mint_recipient", "depositor", "destination_domain", "caller", "max_fee", "min_finality", "hook"]:
+        if getattr(burn, name) != getattr(message, name):
+            raise ValueError(f"Attestation does not match the original burn: {name}.")
 
 
 def classify(message: Message, *, nonce_used: bool, destination_block: int, caller: str | None = None) -> str:
@@ -207,7 +212,23 @@ def receive_calldata(message: str, attestation: str) -> str:
     raw, signatures = hex_bytes(message), hex_bytes(attestation)
     if len(signatures) == 0 or len(signatures) % 65:
         raise ValueError("Attestation must contain complete 65-byte signatures.")
-    return "0x" + (keccak(text="receiveMessage(bytes,bytes)")[:4] + encode(["bytes", "bytes"], [raw, signatures])).hex()
+    return "0x" + (RECEIVE_SELECTOR + encode(["bytes", "bytes"], [raw, signatures])).hex()
+
+
+def decode_receive_calldata(value: str) -> tuple[str, Message]:
+    payload = hex_bytes(value)
+    if payload[:4] != RECEIVE_SELECTOR:
+        raise ValueError("Expected receiveMessage calldata.")
+    try:
+        raw, signatures = decode(["bytes", "bytes"], payload[4:])
+    except DecodingError as exc:
+        raise ValueError("Malformed receiveMessage calldata.") from exc
+    raw_message = "0x" + raw.hex()
+    if receive_calldata(raw_message, "0x" + signatures.hex()) != value.lower():
+        raise ValueError("Expected canonical receiveMessage calldata.")
+    message = decode_message(raw_message)
+    validate_message(message)
+    return raw_message, message
 
 
 def used_nonce_calldata(nonce: str) -> str:

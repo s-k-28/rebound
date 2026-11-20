@@ -15,35 +15,48 @@ from typing import Any
 
 import httpx
 from eth_account import Account
-from eth_utils import keccak
 
-from rebound.protocol import TRANSMITTER, address, hash32, hex_bytes
+from rebound.protocol import (
+    TRANSMITTER,
+    ZERO,
+    Message,
+    address,
+    decode_receive_calldata,
+    hash32,
+    matches_mint_receipt,
+    usdc,
+)
 
 ARC_CHAIN_ID = 5042002
-RECEIVED_TOPIC = (
-    "0x" + keccak(text="MessageReceived(address,uint32,bytes32,bytes32,uint32,bytes)").hex()
-)
 
 
 def integer(value: str | int) -> int:
     return int(value, 16) if isinstance(value, str) and value.startswith("0x") else int(value)
 
 
-def validate_prepared(prepared: dict, caller: str) -> dict:
+def validate_prepared(prepared: dict, caller: str, source_hash: str, log_index: int) -> tuple[dict, str, Message]:
     """An additional local boundary around the service's unsigned payload."""
     tx = prepared["transaction"]
     if integer(tx["chainId"]) != ARC_CHAIN_ID:
         raise ValueError("Recovery is supported only on Arc Testnet (chain 5042002).")
     if address(tx["to"]) != TRANSMITTER or address(tx["from"]) != caller:
         raise ValueError("Prepared transaction has an unexpected contract or caller.")
-    if integer(tx["value"]) != 0 or not tx["data"].startswith("0x57ecfd28"):
+    if integer(tx["value"]) != 0:
         raise ValueError("Prepared transaction is not a zero-value receiveMessage call.")
-    hex_bytes(tx["data"])
     if integer(tx["gas"]) <= 0:
         raise ValueError("Prepared transaction has an invalid gas limit.")
-    address(prepared["recipient"])
-    hash32(prepared["nonce"])
-    return tx
+    if hash32(prepared["tx_hash"]) != source_hash or prepared["log_index"] != log_index:
+        raise ValueError("Prepared transaction identifies a different source burn.")
+    raw, message = decode_receive_calldata(tx["data"])
+    if message.caller not in (ZERO, caller):
+        raise ValueError("Prepared message restricts the destination caller.")
+    if (address(prepared["recipient"]) != message.mint_recipient
+            or hash32(prepared["nonce"]) != message.nonce
+            or prepared["amount"] != usdc(message.amount)
+            or prepared["net_amount"] != usdc(message.amount - message.fee)
+            or prepared["fee"] != usdc(message.fee)):
+        raise ValueError("Prepared review details do not match the encoded message.")
+    return tx, raw, message
 
 
 def fee_in_usdc(gas: int, price: int, cap: Decimal) -> Decimal:
@@ -51,22 +64,6 @@ def fee_in_usdc(gas: int, price: int, cap: Decimal) -> Decimal:
     if not cap.is_finite() or cap <= 0 or price <= 0 or fee > cap:
         raise ValueError("Estimated gas exceeds the local fee cap or the fee cap is invalid.")
     return fee
-
-
-def reviewed_identity(prepared: dict) -> tuple:
-    tx = prepared["transaction"]
-    return (
-        tx["to"].lower(),
-        tx["from"].lower(),
-        tx["data"].lower(),
-        integer(tx["value"]),
-        integer(tx["chainId"]),
-        prepared["recipient"].lower(),
-        prepared["amount"],
-        prepared["net_amount"],
-        prepared["fee"],
-        prepared["nonce"].lower(),
-    )
 
 
 async def recover_transfer(
@@ -86,7 +83,7 @@ async def recover_transfer(
     if log_index < 0:
         raise ValueError("Log index must be nonnegative.")
     prepared = await service.prepare(tx_hash, log_index, caller)
-    tx = validate_prepared(prepared, caller)
+    tx, _, _ = validate_prepared(prepared, caller, tx_hash, log_index)
     if integer(await service.arc.call("eth_chainId")) != ARC_CHAIN_ID:
         raise ValueError("Configured destination RPC is not Arc Testnet.")
     price = integer(await service.arc.call("eth_gasPrice"))
@@ -119,8 +116,8 @@ async def recover_transfer(
 
     # No prior inbox state or exported transaction is trusted for broadcast.
     fresh = await service.prepare(tx_hash, log_index, caller)
-    latest_tx = validate_prepared(fresh, caller)
-    if reviewed_identity(fresh) != reviewed_identity(prepared):
+    latest_tx, raw_message, message = validate_prepared(fresh, caller, tx_hash, log_index)
+    if latest_tx["data"].lower() != tx["data"].lower():
         raise ValueError("Transfer details changed after review. Inspect and approve it again.")
     if integer(await service.arc.call("eth_chainId")) != ARC_CHAIN_ID:
         raise ValueError("Destination RPC changed and is not Arc Testnet.")
@@ -170,17 +167,10 @@ async def recover_transfer(
                     "Destination transaction reverted; gas may have been spent. Re-diagnose the original burn."
                 )
                 return {"status": "reverted", "tx_hash": local_hash, "receipt": receipt}
-            matching_event = any(
-                str(log.get("address", "")).lower() == TRANSMITTER
-                and len(log.get("topics", [])) == 4
-                and log["topics"][0].lower() == RECEIVED_TOPIC
-                and log["topics"][2].lower() == fresh["nonce"].lower()
-                for log in receipt.get("logs", [])
-            )
             if (
                 str(receipt.get("to", "")).lower() != TRANSMITTER
                 or str(receipt.get("from", "")).lower() != caller
-                or not matching_event
+                or not matches_mint_receipt(receipt, local_hash, raw_message, message)
             ):
                 emit(
                     "Receipt confirmed but the expected mint event was not verified. Inspect the transaction."

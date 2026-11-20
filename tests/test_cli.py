@@ -4,11 +4,13 @@ from copy import deepcopy
 from decimal import Decimal
 
 import pytest
+from eth_abi import encode
 from eth_account import Account
 from eth_utils import keccak
 
 from rebound import cli
-from rebound.protocol import TRANSMITTER
+from rebound.protocol import RECEIVED_TOPIC, TRANSMITTER, receive_calldata
+from tests.test_protocol import MESSENGER, OTHER, message_hex, word_address
 
 KEY = "0x" + "01" * 32
 CALLER = Account.from_key(KEY).address.lower()
@@ -22,6 +24,7 @@ class FakeArc:
         self.chain_id = chain_id
         self.uncertain = uncertain
         self.broadcasts = []
+        self.receipt_body = bytes.fromhex(message_hex()[2:])[148:]
 
     async def call(self, method, params=None):
         if method == "eth_chainId":
@@ -49,15 +52,13 @@ class FakeArc:
                     {
                         "address": TRANSMITTER,
                         "topics": [
-                            "0x"
-                            + keccak(
-                                text="MessageReceived(address,uint32,bytes32,bytes32,uint32,bytes)"
-                            ).hex(),
+                            RECEIVED_TOPIC,
                             "0x" + CALLER[2:].rjust(64, "0"),
                             NONCE,
                             "0x" + (2000).to_bytes(32, "big").hex(),
                         ],
-                        "data": "0x",
+                        "data": "0x" + encode(["uint32", "bytes32", "bytes"],
+                                              [6, word_address(MESSENGER), self.receipt_body]).hex(),
                     }
                 ],
             }
@@ -74,7 +75,7 @@ class FakeService:
             "transaction": {
                 "from": CALLER,
                 "to": TRANSMITTER,
-                "data": "0x57ecfd28" + "00" * 128,
+                "data": receive_calldata(message_hex(), "0x" + "ab" * 65),
                 "value": "0x0",
                 "chainId": 5042002,
                 "gas": "0x30d40",
@@ -96,7 +97,8 @@ class FakeService:
             raise self.second_error
         result = deepcopy(self.payload)
         if self.preparations == 2 and self.changed_recipient:
-            result["recipient"] = "0x" + "22" * 20
+            result["recipient"] = OTHER
+            result["transaction"]["data"] = receive_calldata(message_hex(recipient=OTHER), "0x" + "ab" * 65)
         return result
 
 
@@ -190,3 +192,25 @@ async def test_tampered_unsigned_transaction_never_broadcasts(change):
     with pytest.raises(ValueError):
         await run_recovery(service)
     assert service.arc.broadcasts == []
+
+
+@pytest.mark.parametrize("change", [{"recipient": OTHER}, {"net_amount": "128.5"}, {"log_index": 4}])
+async def test_mismatched_review_never_requests_a_key(change):
+    service = FakeService()
+    service.payload.update(change)
+
+    def forbidden_key(_prompt):
+        pytest.fail("A key was requested for a mismatched review")
+
+    with pytest.raises(ValueError, match="review details|source burn"):
+        await cli.recover_transfer(service, TX_HASH, 3, CALLER, read_key=forbidden_key,
+                                   confirm=lambda _: "RECOVER", emit=lambda _: None)
+    assert service.arc.broadcasts == []
+
+
+async def test_matching_nonce_without_matching_message_body_is_not_verified():
+    service = FakeService()
+    service.arc.receipt_body = bytes.fromhex(message_hex(recipient=OTHER)[2:])[148:]
+    result, _ = await run_recovery(service)
+    assert result["status"] == "receipt_unverified"
+    assert len(service.arc.broadcasts) == 1
