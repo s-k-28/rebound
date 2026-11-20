@@ -121,3 +121,7 @@ def test_receive_calldata_contains_only_original_message_and_attestation():
 def test_amount_formatting_never_uses_binary_float():
     assert p.usdc(128_500_001) == "128.500001"
     assert p.usdc(1) == "0.000001"
+
+
+def test_large_uint256_amount_preserves_every_decimal_digit():
+    assert p.usdc(123456789012345678901234567890123456) == "123456789012345678901234567890.123456"

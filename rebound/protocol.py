@@ -6,7 +6,6 @@ and the canonical MessageTransmitter verify Circle's signatures.
 """
 import re
 from dataclasses import dataclass
-from decimal import Decimal
 
 from eth_abi import decode, encode
 from eth_utils import keccak
@@ -46,7 +45,8 @@ def evm_word(value: bytes) -> str:
 
 
 def usdc(amount: int) -> str:
-    return f"{Decimal(amount) / Decimal(1_000_000):f}"
+    whole, fraction = divmod(amount, 1_000_000)
+    return f"{whole}.{fraction:06d}".rstrip("0") if fraction else str(whole)
 
 
 @dataclass(frozen=True)
@@ -93,7 +93,8 @@ def decode_message(value: str) -> Message:
     raw = hex_bytes(value)
     if len(raw) < 376:
         raise ValueError("CCTP V2 message is too short.")
-    number = lambda start, length=32: int.from_bytes(raw[start:start + length], "big")
+    def number(start, length=32):
+        return int.from_bytes(raw[start:start + length], "big")
     if number(0, 4) != 1 or number(148, 4) != 1:
         raise ValueError("Unsupported CCTP message version.")
     return Message(
