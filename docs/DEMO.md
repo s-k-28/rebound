@@ -11,23 +11,24 @@ The controlled testnet workflow has verified receipts and a duplicate-preparatio
    ```bash
    uv run python -m rebound.lab interrupt --amount 1 --recipient "$WALLET" --sender "$WALLET"
    ```
-3. Wait for Ready, which takes 12 Base confirmations plus Circle's attestation, usually under two minutes. Check it off screen with a separate database so the recorded inbox stays fresh:
+3. Wait for Ready after at least 12 Base confirmations and Circle's matching attestation. Check it off screen with a separate database so the recorded inbox starts fresh:
    ```bash
    REBOUND_DB=/tmp/rebound-precheck.sqlite3 uv run python -m rebound.cli inspect "$BURN_TX_HASH"
    ```
 4. Start the recorded app and the recovery terminal with the **same** fresh `REBOUND_DB`, so the inbox can show the locally verified receipt before Circle indexes it.
    ```bash
-   export REBOUND_DB=/tmp/rebound-demo.sqlite3
+   export REBOUND_DB="$(mktemp -d)/rebound-demo.sqlite3"
+   printf 'Use this REBOUND_DB in the recovery terminal: %s\n' "$REBOUND_DB"
    uv run uvicorn rebound.app:app --host 127.0.0.1 --port 8765
    ```
-5. The attestation expires about 24 hours after the burn. The inspector shows the exact Arc expiry block.
+5. Check the inspector's Arc expiry block before the run.
 
 | Time | Screen | Narration |
 |---|---|---|
-| 0:00–0:20 | The controlled burn on Basescan. Arc has no mint yet. | This 1 USDC left Base Sepolia a few minutes ago. The app that sent it closed before the last step, so it is burned on Base and not minted on Arc. |
+| 0:00–0:20 | The controlled burn on Basescan. Arc has no mint yet. | We paused this 1-USDC testnet transfer after the Base Sepolia burn. Its original mint is still waiting on Arc. |
 | 0:20–0:45 | A fresh Rebound tab. Paste only the wallet address and select **Find transfers**. | All we have is the wallet address: no transaction hash and no bridge link. Rebound finds the burn and shows the exact block range it searched. |
-| 0:45–1:15 | Select the **Ready to finish** row. Point to each proof step, then to the recipient and the amounts. | Three records have to agree: the burn receipt on Base, Circle's signed message for that burn, and Arc's nonce record showing the message has not been used. The signature fixes the recipient. 0.99987 USDC arrives after Circle's 0.00013 fee. |
-| 1:15–1:40 | Enter the caller address and select **Review recovery**. | Rebound simulates the finishing call from the address that will sign it. It shows the gas cap before anything is signed. It never asks for a key. |
+| 0:45–1:15 | Select the **Ready to finish** row. Point to each proof step, then to the recipient and the actual amounts shown. | Rebound compares the Base receipt with Circle's signed message and confirms the Arc nonce is unused. The signed message fixes the recipient, and the amounts show Circle's fee and the net mint. |
+| 1:15–1:40 | Enter the caller address and select **Review recovery**. | Rebound simulates the finishing call from the signer’s address and displays the current Arc gas estimate. The local command applies the gas cap before signing. |
 | 1:40–2:05 | In the terminal, run `uv run python -m rebound.cli recover "$BURN_TX_HASH" "$LOG_INDEX" --caller "$WALLET"` and type `RECOVER`. **Cut the key entry.** End on "Destination mint confirmed". | Signing happens locally. The tool checks everything again, asks for an explicit approval, broadcasts once, and verifies the Arc receipt against the original message. |
 | 2:05–2:25 | Back in Rebound, select **Refresh this transfer**, then **Open verified Arc receipt**. | The same transfer is now completed. The Arc receipt's `MessageReceived` nonce matches the original message. |
 | 2:25–2:40 | In the terminal, run `uv run python -m rebound.cli prepare "$BURN_TX_HASH" "$LOG_INDEX" --caller "$WALLET"` and show the refusal. | Ask again and Rebound refuses, because Arc has already used this nonce. That means no second mint and no second burn. |
@@ -55,7 +56,7 @@ The recording uses [the public sample](VALIDATION.md#reproduce-the-read-only-che
 | 2:25–3:15 | Read the 0.99987 USDC mint and 0.00013 USDC attested fee from the case. Explain that the caller pays Arc gas separately. Show the exact case link a support operator can recheck. |
 | 3:15–4:00 | Show the public repository and release limits. Summarize where the next iteration adds value through broader wallet history and a repeatable controlled testnet recovery. |
 
-If a controlled burn is ready on pitch day, replace 1:20–2:25 with the live finish: the 1:15–2:40 rows of the live recovery video.
+If a controlled burn is ready on pitch day, use 1:20–2:25 for the local review, mint and confirmed receipt.
 
 **How does Rebound avoid a second transfer?** It targets the existing CCTP message. Arc’s MessageTransmitterV2 records a consumed nonce after delivery, and Rebound checks it during inspection and again before preparing recovery.
 
