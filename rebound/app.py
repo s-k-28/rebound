@@ -67,6 +67,10 @@ def create_app(recovery: RecoveryService | None = None, *, include_ui: bool = Tr
     async def prepare(payload: PrepareRequest):
         return await checked(recovery.prepare(payload.tx_hash, payload.log_index, payload.caller))
 
+    @api.get("/api/stream-index")
+    async def stream_index(wallet: Annotated[str, Query(pattern=WALLET_PATTERN)]):
+        return await checked(recovery.scan_stream(wallet))
+
     @api.post("/api/streams")
     async def stream(request: Request, x_rebound_secret: Annotated[str | None, Header()] = None):
         expected = recovery.settings.stream_secret

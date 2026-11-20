@@ -45,10 +45,14 @@ async def test_authenticated_stream_envelopes_are_candidates_only(setup_service)
 
     from rebound.app import create_app
     from tests.test_protocol import burn_log
-    service, _ = setup_service
+    service, state = setup_service
     service.settings = replace(service.settings, stream_secret="test-secret")
     app = create_app(service, include_ui=False)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        params = {"wallet": WALLET}
+        history = await client.get("/api/scan", params=params)
+        assert history.json()["transfers"][0]["discovery_source"] == "rpc"
+        assert (await client.get("/api/stream-index", params=params)).json()["transfers"] == []
         assert (await client.post("/api/streams", json={"logs": []})).status_code == 401
         for data in [{"logs": [burn_log()]}, {"data": {"logs": [burn_log()]}, "metadata": {}},
                      {"data": [{"logs": [burn_log()]}], "metadata": {}}]:
@@ -56,3 +60,14 @@ async def test_authenticated_stream_envelopes_are_candidates_only(setup_service)
             assert response.status_code == 200
             assert response.json()["accepted"] == 1
             assert "Candidates only" in response.json()["note"]
+        history = await client.get("/api/scan", params=params)
+        assert history.json()["transfers"][0]["discovery_source"] == "stream"
+
+        state["rpc_error"] = True
+        index = await client.get("/api/stream-index", params=params)
+        assert index.status_code == 200
+        assert index.json()["from_block"] is None
+        assert [(row["discovery_source"], row["status"]) for row in index.json()["transfers"]] == [("stream", "ready")]
+        state["canonical"] = False
+        index = await client.get("/api/stream-index", params=params)
+        assert index.json()["transfers"][0]["status"] == "source_changed"

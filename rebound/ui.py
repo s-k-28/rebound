@@ -70,10 +70,12 @@ class InboxState:
     selected: dict | None = None
     prepared: dict | None = None
     query: str = ""
+    stream: bool = False
 
     def load_examples(self) -> None:
         self.transfers = example_transfers()
         self.example = True
+        self.stream = False
         self.scanned = True
         self.filter = "all"
         self.query = ""
@@ -100,10 +102,11 @@ class InboxState:
                 "ready": sum(item["status"] == "ready" for item in self.transfers),
                 "completed": sum(item["status"] == "completed" for item in self.transfers)}
 
-    async def scan(self, service: Any, wallet: str, blocks: int, end_block: str = "") -> None:
+    async def scan(self, service: Any, wallet: str, blocks: int, end_block: str = "", *, stream: bool = False) -> None:
         self.busy = True
         self.example = False
         self.scanned = False
+        self.stream = stream
         self.error = ""
         self.coverage = ""
         self.partial = False
@@ -114,11 +117,14 @@ class InboxState:
         self.query = ""
         try:
             self.wallet = address(wallet.strip())
-            anchor = end_block.strip()
-            if anchor and (not anchor.isascii() or not anchor.isdecimal() or len(anchor) > 16):
-                raise ValueError("Enter a Base Sepolia end block using digits only.")
-            options = {"end_block": int(anchor)} if anchor else {}
-            result = await service.scan(self.wallet, blocks=blocks, **options)
+            if stream:
+                result = await service.scan_stream(self.wallet)
+            else:
+                anchor = end_block.strip()
+                if anchor and (not anchor.isascii() or not anchor.isdecimal() or len(anchor) > 16):
+                    raise ValueError("Enter a Base Sepolia end block using digits only.")
+                options = {"end_block": int(anchor)} if anchor else {}
+                result = await service.scan(self.wallet, blocks=blocks, **options)
             self.transfers = result["transfers"]
             self.coverage = result.get("coverage") or f"Base Sepolia blocks {result['from_block']:,}–{result['to_block']:,}."
             self.partial = bool(result.get("partial"))
@@ -363,6 +369,9 @@ class InboxUI:
             history_label = f"History options · end block {self.end_block.value.strip()[:16]}"
         controls.append(ft.TextButton(history_label,
             icon=ft.Icons.HISTORY_ROUNDED, on_click=self.toggle_history, disabled=self.state.busy))
+        if getattr(getattr(self.service, "settings", None), "stream_secret", ""):
+            controls.append(ft.TextButton("Search Stream index", icon=ft.Icons.DYNAMIC_FEED_OUTLINED,
+                on_click=self.scan_index, disabled=self.state.busy))
         if self.show_history:
             controls.append(ft.Row([self.end_block, self.text("Use a Base Sepolia block number to revisit an older window.", 11, MUTED)],
                 wrap=True, spacing=12))
@@ -419,7 +428,10 @@ class InboxUI:
             children.extend(self.transfer_row(item) for item in visible)
         else:
             empty_title = "No matching transfers" if self.state.scanned else "A fresh start for unfinished transfers."
-            empty_body = "Try a different filter or a wider history range. Results cover only the supported route and scanned blocks." if self.state.scanned else "Enter a public wallet address above. We'll reconstruct supported transfers and check what still needs to happen."
+            empty_body = "Enter a public wallet address above. We'll reconstruct supported transfers and check what still needs to happen."
+            if self.state.scanned:
+                empty_body = ("Try a different filter or scan source history directly." if self.state.stream
+                              else "Try a different filter or a wider history range. Results cover only the supported route and scanned blocks.")
             children.append(ft.Container(ft.Column([
                 ft.Container(ft.Icon(ft.Icons.ALT_ROUTE_ROUNDED, color=BLUE, size=32), width=76, height=76,
                              bgcolor="#EAF1E9", border_radius=24, alignment=ft.Alignment.CENTER),
@@ -496,6 +508,9 @@ class InboxUI:
         values = [self.value_line("Fixed recipient", item["recipient"], selectable=True),
                   self.value_line("Recipient receives", display_amount(item.get("net_amount")) + " USDC" if item.get("net_amount") else "Waiting for attestation"),
                   self.value_line("Protocol fee", display_amount(item["fee"]) + " USDC" if item.get("fee") is not None else "Not available yet")]
+        if item.get("discovery_source"):
+            discovery = "Stream delivery" if item["discovery_source"] == "stream" else "Source RPC history"
+            values.append(self.value_line("Discovered via", discovery))
         controls = [header, ft.Container(ft.Column([
             self.text(item.get("explanation") or description, 12, MUTED), path,
             ft.Divider(color=LINE), *values,
@@ -572,7 +587,7 @@ class InboxUI:
             controls.append(self.text(description, 14, MUTED))
             if item["status"] == "expired":
                 controls.append(ft.TextButton("Circle re-attestation guide", url="https://developers.circle.com/cctp/howtos/troubleshoot-transfers", icon=ft.Icons.OPEN_IN_NEW_ROUNDED))
-            controls.append(self.button("Refresh live state", self.scan, icon=ft.Icons.REFRESH_ROUNDED))
+            controls.append(self.button("Refresh live state", self.refresh_scan, icon=ft.Icons.REFRESH_ROUNDED))
         return ft.Container(ft.Column(controls, spacing=16,
                             horizontal_alignment=ft.CrossAxisAlignment.STRETCH), padding=22,
                             border=ft.Border(top=ft.BorderSide(1, LINE)))
@@ -610,14 +625,20 @@ class InboxUI:
         content = ft.Column([note, link], spacing=8) if self.narrow else ft.Row([note, link], spacing=16)
         return ft.Container(content, padding=ft.Padding.only(bottom=20))
 
-    async def scan(self, _=None) -> None:
+    async def scan(self, _=None, *, stream: bool = False) -> None:
         if self.state.busy:
             return
         self.state.busy = True
         self.render()
         await self.state.scan(self.service, self.wallet_input.value or self.state.wallet,
-                              int(self.history.value or "2000"), self.end_block.value or "")
+                              int(self.history.value or "2000"), self.end_block.value or "", stream=stream)
         self.render()
+
+    async def scan_index(self, _=None) -> None:
+        await self.scan(stream=True)
+
+    async def refresh_scan(self, _=None) -> None:
+        await self.scan(stream=self.state.stream)
 
     def toggle_history(self, _=None):
         self.show_history = not self.show_history
@@ -663,7 +684,7 @@ class InboxUI:
 
         def still_selected() -> bool:
             return (self.state is state and state.selected is transfer and not state.example
-                    and self.caller_input.value == caller)
+                    and (self.caller_input.value or "") == caller)
 
         self.preparing = True
         self.review_error = ""

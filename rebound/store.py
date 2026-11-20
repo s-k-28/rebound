@@ -3,9 +3,16 @@
 import json
 import sqlite3
 from contextlib import closing
+from dataclasses import dataclass
 from pathlib import Path
 
 from rebound.protocol import Burn, decode_burn
+
+
+@dataclass(frozen=True)
+class IndexedBurn:
+    burn: Burn
+    from_stream: bool
 
 
 class CandidateStore:
@@ -13,38 +20,48 @@ class CandidateStore:
         self.path = path
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         with closing(sqlite3.connect(path)) as db:
+            db.execute("BEGIN IMMEDIATE")
             db.execute("""CREATE TABLE IF NOT EXISTS candidates (
                 tx_hash TEXT NOT NULL, log_index INTEGER NOT NULL,
                 depositor TEXT NOT NULL, recipient TEXT NOT NULL,
-                block_number INTEGER NOT NULL, payload TEXT NOT NULL,
+                block_number INTEGER NOT NULL, payload TEXT NOT NULL, stream_block_hash TEXT,
                 PRIMARY KEY(tx_hash, log_index))""")
+            if "stream_block_hash" not in {row[1] for row in db.execute("PRAGMA table_info(candidates)")}:
+                db.execute("ALTER TABLE candidates ADD COLUMN stream_block_hash TEXT")
             db.execute("CREATE INDEX IF NOT EXISTS by_depositor ON candidates(depositor)")
             db.execute("CREATE INDEX IF NOT EXISTS by_recipient ON candidates(recipient)")
             db.commit()
 
-    def save(self, burn: Burn, log: dict) -> None:
+    def save(self, burn: Burn, log: dict, *, from_stream: bool = False) -> None:
         with closing(sqlite3.connect(self.path, timeout=10)) as db:
-            db.execute("""INSERT INTO candidates VALUES (?, ?, ?, ?, ?, ?)
+            db.execute("""INSERT INTO candidates
+                (tx_hash, log_index, depositor, recipient, block_number, payload, stream_block_hash)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(tx_hash, log_index) DO UPDATE SET
                 depositor=excluded.depositor, recipient=excluded.recipient,
-                block_number=excluded.block_number, payload=excluded.payload""",
+                block_number=excluded.block_number, payload=excluded.payload,
+                stream_block_hash=COALESCE(excluded.stream_block_hash, candidates.stream_block_hash)""",
                 (burn.tx_hash, burn.log_index, burn.depositor, burn.mint_recipient,
-                 burn.block_number, json.dumps(log)))
+                 burn.block_number, json.dumps(log), burn.block_hash if from_stream else None))
             db.commit()
 
-    def candidates(self, wallet: str, limit: int = 101, *, block_range: tuple[int, int] | None = None) -> list[Burn]:
-        query = "SELECT payload FROM candidates WHERE (depositor=? OR recipient=?)"
+    def candidates(self, wallet: str, limit: int = 101, *, block_range: tuple[int, int] | None = None,
+                   stream_only: bool = False) -> list[IndexedBurn]:
+        query = "SELECT payload, stream_block_hash FROM candidates WHERE (depositor=? OR recipient=?)"
         params: tuple = (wallet, wallet)
         if block_range is not None:
             query += " AND block_number BETWEEN ? AND ?"
             params += block_range
+        if stream_only:
+            query += " AND stream_block_hash = lower(json_extract(payload, '$.blockHash'))"
         query += " ORDER BY block_number DESC, log_index DESC, tx_hash ASC LIMIT ?"
         with closing(sqlite3.connect(self.path, timeout=10)) as db:
             rows = db.execute(query, (*params, limit)).fetchall()
         burns = []
-        for row in rows:
+        for payload, stream_block_hash in rows:
             try:
-                burns.append(decode_burn(json.loads(row[0])))
+                burn = decode_burn(json.loads(payload))
+                burns.append(IndexedBurn(burn, burn.block_hash == stream_block_hash))
             except (ValueError, TypeError):
                 continue
         return burns

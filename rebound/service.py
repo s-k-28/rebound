@@ -9,7 +9,7 @@ import httpx
 
 from rebound import protocol as p
 from rebound.clients import Circle, RangeLimitError, Rpc, UpstreamError, quantity
-from rebound.store import CandidateStore
+from rebound.store import CandidateStore, IndexedBurn
 
 
 @dataclass(frozen=True)
@@ -103,7 +103,7 @@ class RecoveryService:
                 burn = p.decode_burn(log)
                 if burn.destination_domain != 26:
                     continue
-                self.store.save(burn, log)
+                self.store.save(burn, log, from_stream=True)
                 accepted += 1
             except (ValueError, KeyError, TypeError, AttributeError):
                 continue
@@ -158,19 +158,37 @@ class RecoveryService:
             size = self._log_chunk_size
             await _gather_reads(*(read_chunk(first, min(first + size - 1, end)) for first in range(start, end + 1, size)))
             burns = self.store.candidates(wallet, block_range=(start, end) if end_block is not None else None)
-            partial = len(burns) > 100
-
-            async def inspect(burn):
-                async with self._read_slots:
-                    return await self.diagnose(burn, source_head=latest)
-
-            transfers = await asyncio.gather(*(inspect(burn) for burn in burns[:100]))
+            transfers = await self._inspect_candidates(burns, latest)
             indexed = ", plus previously indexed candidates" if end_block is None else " (fixed range)"
             return {
                 "wallet": wallet, "from_block": start, "to_block": end,
                 "coverage": f"Base Sepolia blocks {start:,}–{end:,}{indexed}. Covers native USDC CCTP V2 burns to Arc.",
-                "partial": partial, "transfers": transfers,
+                "partial": len(burns) > 100, "transfers": transfers,
             }
+
+    async def scan_stream(self, wallet: str) -> dict:
+        wallet = p.address(wallet)
+        if not self.settings.stream_secret:
+            raise ValueError("The Stream index is not enabled on this server.")
+        async with self._scan_slots:
+            burns = self.store.candidates(wallet, stream_only=True)
+            transfers = []
+            if burns:
+                await self._verify_chain(self.base, 84532, p.MESSENGER)
+                latest = quantity(await self.base.call("eth_blockNumber"))
+                transfers = await self._inspect_candidates(burns, latest)
+            return {"wallet": wallet, "from_block": None, "to_block": None, "partial": len(burns) > 100,
+                    "coverage": "Only received Stream events. The index may not cover all source blocks.",
+                    "transfers": transfers}
+
+    async def _inspect_candidates(self, burns: list[IndexedBurn], source_head: int) -> list[dict]:
+        async def inspect(candidate: IndexedBurn):
+            async with self._read_slots:
+                row = await self.diagnose(candidate.burn, source_head=source_head)
+                row["discovery_source"] = "stream" if candidate.from_stream else "rpc"
+                return row
+
+        return await _gather_reads(*(inspect(candidate) for candidate in burns[:100]))
 
     async def _receipt_burn(self, tx_hash: str, log_index: int, expected: p.Burn | None = None) -> p.Burn:
         receipt = await self.base.call("eth_getTransactionReceipt", [p.hash32(tx_hash)])
