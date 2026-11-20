@@ -155,8 +155,9 @@ TOOL_SPECS = {
             "Find Circle CCTP V2 USDC transfers from Base Sepolia to Arc Testnet for a public wallet "
             "address (as depositor or recipient) without the burn hash. Use it when an agent or app "
             "lost track of a transfer mid-flight. Scans the last `blocks` Base Sepolia blocks "
-            "(default 2,000, max 50,000) ending at `end_block` or the current head, plus previously "
-            "indexed candidates, and verifies each burn against its receipt, Circle's attestation and "
+            "(default 2,000, max 50,000) ending at `end_block`, UTC `end_time`, or the current head. "
+            "Only current-head scans also include previously indexed candidates; anchored scans stay "
+            "within the reported block range. Verifies each burn against its receipt, Circle's attestation and "
             "Arc's nonce. Every transfer, including completed ones, carries a status and next_step. "
             "An empty result covers only the reported block range: widen `blocks` or move "
             "`end_block` before concluding nothing is pending." + SAFETY
@@ -166,10 +167,14 @@ TOOL_SPECS = {
             "properties": {
                 "wallet": WALLET_FIELD,
                 "blocks": {"type": "integer", "minimum": 1, "maximum": 50_000, "default": 2000,
-                           "description": "Base Sepolia blocks to scan, ending at end_block (about 2 s each)."},
+                           "description": "Number of Base Sepolia blocks to scan, ending at the requested anchor."},
                 "end_block": {"type": "integer", "minimum": 0,
                               "description": "Last Base Sepolia block to scan. Omit for the current head. "
-                                             "A fixed window excludes indexed candidates outside it."},
+                                             "A fixed window excludes indexed candidates outside it. "
+                                             "Cannot be combined with end_time."},
+                "end_time": {"type": "string", "minLength": 16, "maxLength": 40,
+                             "description": "UTC scan end, e.g. 2026-11-20 07:30 or 2026-11-20T07:30:00Z. "
+                                            "Cannot be combined with end_block."},
             },
             "required": ["wallet"],
             "additionalProperties": False,
@@ -179,8 +184,9 @@ TOOL_SPECS = {
             "properties": {
                 "wallet": {"type": "string"}, "from_block": {"type": "integer"},
                 "to_block": {"type": "integer"}, "coverage": {"type": "string"},
-                "partial": {"type": "boolean", "description": "True when more than 100 candidates "
-                            "matched and only the first 100 were verified."},
+                "partial": {"type": "boolean", "description": "True when provider retention shortened "
+                            "the requested history or verification was limited to the first 100 candidates. "
+                            "Consult coverage and the reported block range."},
                 "counts": COUNTS_FIELD, "transfers": TRANSFERS_FIELD,
             },
             "required": ["wallet", "from_block", "to_block", "coverage", "partial", "counts", "transfers"],
@@ -316,6 +322,11 @@ def schema_errors(schema: dict, value, path: str = "") -> list[str]:
         return [f"{label} must be {' or '.join(kinds)}"]
     if "enum" in schema and value not in schema["enum"]:
         return [f"{label} must be one of {', '.join(map(str, schema['enum']))}"]
+    if isinstance(value, str):
+        if "minLength" in schema and len(value) < schema["minLength"]:
+            return [f"{label} must have at least {schema['minLength']} characters"]
+        if "maxLength" in schema and len(value) > schema["maxLength"]:
+            return [f"{label} must have at most {schema['maxLength']} characters"]
     if isinstance(value, str) and "pattern" in schema:
         if not re.search(re.sub(r"\$$", r"\\Z", schema["pattern"]), value):
             return [f"{label} must be {PATTERN_HINTS.get(schema['pattern'], schema['pattern'])}"]
@@ -367,18 +378,23 @@ def _counts_text(counts: dict) -> str:
 
 
 async def find_unfinished_transfers(service, args: dict) -> tuple[str, dict]:
-    data = await service.scan(args["wallet"], blocks=args.get("blocks", 2000),
-                              end_block=args.get("end_block"))
+    options = {"blocks": args.get("blocks", 2000), "end_block": args.get("end_block")}
+    if args.get("end_time") is not None:
+        if args.get("end_block") is not None:
+            raise ValueError("Use either end_block or end_time, not both.")
+        options["end_time"] = args["end_time"]
+    data = await service.scan(args["wallet"], **options)
     transfers, counts = _transfers(data["transfers"])
     lines = [f"Wallet {data['wallet']}: {data['coverage']}"]
     if data.get("partial"):
-        lines.append("Partial: more than 100 candidates matched and only 100 were verified.")
+        lines.append("Partial: provider retention may have shortened the requested history, or verification "
+                     "was limited to the first 100 candidates. Consult coverage and the reported block range.")
     if transfers:
         lines.append(f"{len(transfers)} transfer(s): {_counts_text(counts)}.")
         lines += _transfer_lines(transfers)
     else:
         lines.append("No supported transfers in that range. This is not proof that nothing is pending "
-                     "elsewhere: raise blocks (max 50,000) or set end_block to search earlier history.")
+                     "elsewhere: raise blocks (max 50,000) or set end_block or end_time to search earlier history.")
     return "\n".join(lines), {**data, "counts": counts, "transfers": transfers}
 
 

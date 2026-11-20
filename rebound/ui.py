@@ -120,24 +120,28 @@ def block_window(blocks: int, end_block: str = "") -> tuple[int, int] | None:
     return max(0, end - blocks + 1), end
 
 
-def scan_status_line(mode: str, search: str, blocks: int, end_block: str = "") -> str:
+def scan_status_line(mode: str, search: str, blocks: int, end_block: str = "", *, end_time: str = "") -> str:
     """What the ledger says while a lookup runs: the exact range or transaction being read."""
     target = shorten((search or "").strip().lower(), 4)
     if mode == "transaction":
         return f"Checking Base Sepolia transaction {target}"
     if mode == "stream":
         return f"Searching the Stream index for {target}"
+    if end_time:
+        return f"Resolving the UTC cutoff for {target}"
     window = block_window(blocks, end_block)
     if window:
         return f"Scanning Base Sepolia blocks {window[0]:,}–{window[1]:,} for {target}"
     return f"Scanning the latest {blocks:,} Base Sepolia blocks for {target}"
 
 
-def empty_result_message(mode: str, blocks: int, end_block: str = "") -> str:
+def empty_result_message(mode: str, blocks: int, end_block: str = "", *, end_time: str = "") -> str:
     if mode == "transaction":
         return "No supported burn in this transaction. Use the original Base Sepolia burn transaction hash."
     if mode == "stream":
         return "The Stream index has no supported transfers for this address. Scan source history directly."
+    if end_time:
+        return "No supported transfers in the resolved UTC window."
     window = block_window(blocks, end_block)
     if window:
         return f"No supported transfers in Base Sepolia blocks {window[0]:,}–{window[1]:,}."
@@ -254,7 +258,7 @@ class InboxState:
                 "completed": sum(item["status"] == "completed" for item in self.transfers)}
 
     async def scan(self, service: Any, search: str, blocks: int, end_block: str = "", *,
-                   mode: str = "wallet", log_index: int | None = None) -> None:
+                   end_time: str | None = None, mode: str = "wallet", log_index: int | None = None) -> None:
         self.busy = True
         self.example = False
         self.scanned = False
@@ -284,6 +288,10 @@ class InboxState:
                     if anchor and (not anchor.isascii() or not anchor.isdecimal() or len(anchor) > 16):
                         raise ValueError("Enter a Base Sepolia end block using digits only.")
                     options = {"end_block": int(anchor)} if anchor else {}
+                    if end_time and end_time.strip():
+                        if anchor:
+                            raise ValueError("Choose an ending block or an ending UTC time, not both.")
+                        options["end_time"] = end_time.strip()
                     result = await service.scan(wallet, blocks=blocks, **options)
             self.transfers = result["transfers"]
             self.coverage = result.get("coverage") or f"Base Sepolia blocks {result['from_block']:,}–{result['to_block']:,}."
@@ -327,6 +335,7 @@ class InboxUI:
         self.input_error_field = None
         self.input_error_value = ""
         self.input_error_text = ft.Text("", size=12.5, color=RED, weight=ft.FontWeight.W_600, visible=False)
+        self.input_error_notice = ft.Semantics(content=self.input_error_text, live_region=True, visible=False)
         # What the last lookup asked for, so loading, empty and retry copy describe that request.
         self.last_lookup: dict | None = None
         self.show_transaction = False
@@ -339,10 +348,18 @@ class InboxUI:
             filled=True, fill_color=SURFACE, border_color=RULE_STRONG, focused_border_color=ACCENT,
             border_radius=6, content_padding=ft.Padding.symmetric(horizontal=12, vertical=6),
         )
-        self.end_block = ft.TextField(hint_text="End block, blank for latest", width=230, height=40,
+        self.history_ending = ft.Dropdown(value="latest", width=188, text_size=13, dense=True,
+            options=[ft.DropdownOption("latest", "Latest blocks"), ft.DropdownOption("block", "End block"),
+                     ft.DropdownOption("time", "End time (UTC)")], on_select=self.change_history_ending,
+            filled=True, fill_color=SURFACE, border_color=RULE_STRONG, focused_border_color=ACCENT,
+            border_radius=6, content_padding=ft.Padding.symmetric(horizontal=12, vertical=6))
+        self.end_block = ft.TextField(hint_text="Base Sepolia end block", width=230, height=40,
                                       keyboard_type=ft.KeyboardType.NUMBER, on_submit=self.scan,
                                       on_change=self.input_changed,
                                       **field_style(content_padding=ft.Padding.symmetric(horizontal=12, vertical=10)))
+        self.end_time = ft.TextField(hint_text="YYYY-MM-DD HH:MM (UTC)", width=280, height=40,
+                                     on_submit=self.scan,
+                                     **field_style(content_padding=ft.Padding.symmetric(horizontal=12, vertical=10)))
         self.show_history = False
         self.caller_input = ft.TextField(hint_text="Signing address, 0x…", height=42,
                                          on_change=self.caller_changed, **field_style())
@@ -492,6 +509,8 @@ class InboxUI:
         self.tx_input.disabled = self.state.busy
         self.history.disabled = self.state.busy
         self.end_block.disabled = self.state.busy
+        self.end_time.disabled = self.state.busy
+        self.history_ending.disabled = self.state.busy
         self.caller_input.disabled = self.preparing
         self.search_input.value = self.state.query
         self.inspector_host.animate_opacity = None
@@ -577,7 +596,7 @@ class InboxUI:
             self.history.expand = True
             self.history.width = None
             # On phones the form stacks, so the message goes straight under the field it is about.
-            form = ft.Column([entry, self.input_error_text, ft.Row([*extras, action], spacing=8)], spacing=8,
+            form = ft.Column([entry, self.input_error_notice, ft.Row([*extras, action], spacing=8)], spacing=8,
                              horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
         else:
             entry.expand = True
@@ -599,16 +618,14 @@ class InboxUI:
         # service errors render inside the ledger, where the results will appear.
         controls = [form, ft.Row(options, wrap=True, spacing=4, run_spacing=0)]
         if not self.narrow:
-            controls.insert(1, self.input_error_text)
+            controls.insert(1, self.input_error_notice)
         if self.show_history and not self.show_transaction:
-            controls.append(ft.Row([self.end_block,
-                self.text("Scan back from this Base Sepolia block to revisit an older window.", 12, INK_3)],
-                wrap=True, spacing=12))
+            controls.append(self.history_window())
         return ft.Column(controls, spacing=8)
 
     def mounted_fields(self) -> list:
         fields = [self.tx_input] if self.show_transaction else [self.wallet_input]
-        if self.show_history and not self.show_transaction:
+        if self.show_history and not self.show_transaction and self.history_ending.value == "block":
             fields.append(self.end_block)
         return fields
 
@@ -621,6 +638,7 @@ class InboxUI:
                  and (target.value or "") == self.input_error_value)
         self.input_error_text.value = self.input_error if shown else ""
         self.input_error_text.visible = shown
+        self.input_error_notice.visible = shown
         for entry in (self.wallet_input, self.tx_input, self.end_block):
             invalid = shown and entry is self.input_error_field
             entry.border_color = RED if invalid else RULE_STRONG
@@ -635,7 +653,7 @@ class InboxUI:
         self.sync_input_error()
         if self._installed and (self.split_workspace or not self.state.selected):
             # Update in place: replacing the form's ancestors would drop keyboard focus from the field.
-            for control in (self.input_error_text, *self.mounted_fields()):
+            for control in (self.input_error_notice, *self.mounted_fields()):
                 control.update()
 
     def input_changed(self, _=None) -> None:
@@ -644,12 +662,35 @@ class InboxUI:
 
     def history_options(self):
         history_label = "Hide history options" if self.show_history else "History options"
-        if not self.show_history and self.end_block.value.strip():
-            history_label = f"History options (end block {self.end_block.value.strip()[:16]})"
+        if not self.show_history:
+            if self.history_ending.value == "block" and self.end_block.value.strip():
+                history_label = f"History options (end block {self.end_block.value.strip()[:16]})"
+            elif self.history_ending.value == "time" and self.end_time.value.strip():
+                history_label = "History options (end time UTC)"
         options = [self.link(history_label, self.toggle_history, disabled=self.state.busy)]
         if not self.state.example and getattr(getattr(self.service, "settings", None), "stream_enabled", False):
             options.append(self.link("Search Stream index", self.scan_index, disabled=self.state.busy))
         return options
+
+    def history_window(self):
+        ending = self.history_ending.value
+        anchor = self.end_block if ending == "block" else self.end_time if ending == "time" else None
+        self.history_ending.width = None if self.narrow else 188
+        controls = [self.history_ending]
+        if anchor is not None:
+            anchor.width = None if self.narrow else 280 if ending == "time" else 230
+            controls.append(anchor)
+        fields = (ft.Column(controls, spacing=8, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
+                  if self.narrow else ft.Row(controls, spacing=8))
+        note = ("Scan backwards from the latest Base Sepolia block by the selected block window." if ending == "latest"
+                else "Choose a time after the transfer. Rebound scans backward over the selected number of blocks. "
+                "Times without seconds use :00 UTC; blank uses latest."
+                if ending == "time" else "Choose an ending Base Sepolia block. Rebound scans backward over the selected number of blocks. Blank uses latest.")
+        return ft.Column([fields, self.text(note, 12, INK_3)], spacing=6)
+
+    def change_history_ending(self, _=None):
+        if not self.state.busy:
+            self.render()
 
     def inbox(self):
         counts = self.state.counts()
@@ -739,7 +780,8 @@ class InboxUI:
     def lookup_line(self) -> str:
         lookup = self.last_lookup or {}
         return scan_status_line(lookup.get("mode", "wallet"), lookup.get("search", ""),
-                                lookup.get("blocks", 2000), lookup.get("end_block", ""))
+                                lookup.get("blocks", 2000), lookup.get("end_block", ""),
+                                end_time=lookup.get("end_time", ""))
 
     def loading_ledger(self):
         return self.ledger_note([
@@ -769,8 +811,9 @@ class InboxUI:
                                              disabled=self.state.busy))
             elif mode == "stream":
                 actions.append(self.button("Scan source history", self.scan, disabled=self.state.busy))
-            return self.ledger_note([self.text(empty_result_message(mode, lookup["blocks"], lookup["end_block"]),
-                                               13, INK, ft.FontWeight.W_600)], actions)
+            message = empty_result_message(mode, lookup["blocks"], lookup["end_block"],
+                                           end_time=lookup.get("end_time", ""))
+            return self.ledger_note([self.text(message, 13, INK, ft.FontWeight.W_600)], actions)
         if self.show_transaction:
             return self.ledger_note([self.text("Paste the Base Sepolia hash of the original burn transaction.", 13, INK_2)])
         return self.ledger_note(
@@ -1189,13 +1232,19 @@ class InboxUI:
         if self.state.busy:
             return
         search = self.tx_input.value if mode == "transaction" else self.wallet_input.value or self.state.wallet
-        blocks, end_block = int(self.history.value or "2000"), self.end_block.value or ""
+        blocks = int(self.history.value or "2000")
+        ending = self.history_ending.value if mode == "wallet" else "latest"
+        end_block = (self.end_block.value or "") if ending == "block" else ""
+        end_time = (self.end_time.value or "").strip() if ending == "time" else ""
         # Catch a malformed address or hash at the field, before any network call and
         # without discarding the results already on screen.
         problem = lookup_error(mode, search or "", end_block)
         if problem:
             target = (self.tx_input if mode == "transaction" else
                       self.end_block if problem.endswith("end block.") else self.wallet_input)
+            if target is self.end_block and not self.show_history:
+                self.show_history = True
+                self.render()
             self.set_input_error(problem, target)
             if self._installed:
                 try:
@@ -1210,22 +1259,36 @@ class InboxUI:
             return
         self.set_input_error("", None)
         self.last_lookup = {"mode": mode, "search": search or "", "blocks": blocks, "end_block": end_block,
-                            "log_index": log_index}
+                            "end_time": end_time, "log_index": log_index}
         self.clear_receipt_editor()
         self.state.busy = True
         self.render()
-        await self.state.scan(self.service, search or "", blocks, end_block, mode=mode, log_index=log_index)
+        await self.state.scan(self.service, search or "", blocks, end_block,
+                              end_time=end_time, mode=mode, log_index=log_index)
         self.render()
+
+    def restore_lookup(self, lookup: dict) -> None:
+        self.show_transaction = lookup["mode"] == "transaction"
+        entry = self.tx_input if self.show_transaction else self.wallet_input
+        entry.value = lookup["search"]
+        if lookup["mode"] == "wallet":
+            self.history.value = str(lookup["blocks"])
+            self.end_block.value = lookup["end_block"]
+            self.end_time.value = lookup["end_time"]
+            self.history_ending.value = "time" if lookup["end_time"] else "block" if lookup["end_block"] else "latest"
 
     async def retry(self, _=None) -> None:
         lookup = self.last_lookup
         if lookup and not self.state.busy:
+            self.restore_lookup(lookup)
             await self.scan(mode=lookup["mode"], log_index=lookup["log_index"])
 
     async def widen(self, _=None) -> None:
         wider = wider_window((self.last_lookup or {}).get("blocks") or int(self.history.value or "2000"))
         if wider is None or self.state.busy:
             return
+        if self.last_lookup and self.last_lookup["mode"] == "wallet":
+            self.restore_lookup(self.last_lookup)
         self.history.value = str(wider)
         await self.scan()
 
@@ -1245,6 +1308,7 @@ class InboxUI:
         self.show_history = True
         self.wallet_input.value = LIVE_SAMPLE_WALLET
         self.end_block.value = str(LIVE_SAMPLE_END_BLOCK)
+        self.history_ending.value = "block"
         self.history.value = str(LIVE_SAMPLE_BLOCKS)
         await self.scan()
 

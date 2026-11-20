@@ -32,6 +32,16 @@ ARC_CHAIN_ID = 5042002
 RECEIPT_TIMEOUT_SECONDS = 60
 
 
+def end_time_argument(value: str) -> str:
+    """Bound the public input; backend validates UTC timezone and calendar values."""
+    if not 16 <= len(value) <= 40:
+        raise argparse.ArgumentTypeError(
+            "Use a UTC date/time (16–40 characters), e.g. '2026-11-20 07:30' "
+            "or '2026-11-20T07:30:00Z'."
+        )
+    return value
+
+
 def integer(value: str | int) -> int:
     return int(value, 16) if isinstance(value, str) and value.startswith("0x") else int(value)
 
@@ -198,7 +208,12 @@ def parser() -> argparse.ArgumentParser:
     )
     scan.add_argument("wallet")
     scan.add_argument("--blocks", type=int, default=2000)
-    scan.add_argument("--end-block", type=int, help="Use a fixed Base Sepolia block as the end of the scan")
+    ending = scan.add_mutually_exclusive_group()
+    ending.add_argument("--end-block", type=int, help="Use a fixed Base Sepolia block as the end of the scan")
+    ending.add_argument(
+        "--end-time", type=end_time_argument, metavar="UTC",
+        help="End the scan at UTC time, e.g. '2026-11-20 07:30' or '2026-11-20T07:30:00Z'.",
+    )
     index = commands.add_parser("stream-index", help="Find and verify transfers from received Stream events")
     index.add_argument("wallet")
     lookup = commands.add_parser("inspect", help="Find supported burns within one Base Sepolia receipt")
@@ -235,6 +250,12 @@ async def run(args: argparse.Namespace) -> dict:
     async with httpx.AsyncClient(timeout=25) as client:
         service = RecoveryService(Settings.from_env(), client)
         if args.command == "scan":
+            end_time = getattr(args, "end_time", None)
+            if end_time is not None:
+                if args.end_block is not None:
+                    raise ValueError("Use either --end-block or --end-time, not both.")
+                return await service.scan(args.wallet, blocks=args.blocks, end_block=args.end_block,
+                                          end_time=end_time)
             return await service.scan(args.wallet, blocks=args.blocks, end_block=args.end_block)
         if args.command == "stream-index":
             return await service.scan_stream(args.wallet)

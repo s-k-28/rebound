@@ -6,6 +6,54 @@ import pytest
 from rebound import protocol, ui
 
 
+async def test_history_end_time_shows_the_services_safe_validation_error():
+    class Validator:
+        async def scan(self, _wallet, *, blocks, end_time):
+            assert end_time == "invalid time"
+            raise ValueError("Enter a valid ending UTC date and time.")
+    state = ui.InboxState()
+    await state.scan(Validator(), "0x" + "11" * 20, 200, end_time=" invalid time ")
+    assert state.error == "Enter a valid ending UTC date and time."
+    assert not state.busy
+
+
+async def test_history_choice_passes_only_the_active_nonempty_anchor(monkeypatch):
+    class Scanner:
+        def __init__(self):
+            self.calls = []
+
+        async def scan(self, wallet, *, blocks, **options):
+            self.calls.append((wallet, blocks, options))
+            return {"transfers": [], "coverage": "Fixture fixed window"}
+    service = Scanner()
+    app = ui.InboxUI(object(), service)
+    monkeypatch.setattr(app, "render", lambda: None)
+    app.wallet_input.value = "0x" + "11" * 20
+    app.end_block.value = "61175721"
+    app.end_time.value = " 2026-11-20 06:44 "
+    for choice in ("latest", "time", "block"):
+        app.history_ending.value = choice
+        await app.scan()
+    app.history_ending.value = "time"
+    app.end_time.value = " "
+    await app.scan()
+    assert [options for _, _, options in service.calls] == [
+        {}, {"end_time": "2026-11-20 06:44"}, {"end_block": 61175721}, {}]
+
+
+@pytest.mark.parametrize("width", [1440, 390])
+def test_history_window_mounts_only_the_active_input_and_fits_both_layouts(width):
+    app = ui.InboxUI(SimpleNamespace(width=width), object())
+    for choice, active in [("latest", None), ("block", app.end_block), ("time", app.end_time)]:
+        app.history_ending.value = choice
+        panel = app.history_window()
+        fields = panel.controls[0]
+        assert fields.controls == [app.history_ending] + ([active] if active else [])
+        if width == 390:
+            assert isinstance(fields, ui.ft.Column)
+            assert all(control.width is None for control in fields.controls)
+
+
 def test_related_amounts_preserve_large_uint256_fractional_units():
     amount = protocol.usdc(10**60 + 123_457)
     assert ui.aligned_amounts(amount, "0.000001", "0.123456") == [
@@ -679,6 +727,46 @@ async def test_retry_and_widen_rerun_the_last_lookup(monkeypatch):
     await app.widen()
     assert [blocks for _, blocks, _ in calls] == [2000, 2000, 10_000]
     assert app.history.value == "10000" and app.last_lookup["blocks"] == 10_000
+
+
+async def test_retry_and_widen_keep_the_submitted_utc_window(monkeypatch):
+    calls = []
+
+    class Recording:
+        async def scan(self, wallet, *, blocks, **options):
+            calls.append((wallet, blocks, options))
+            return {"transfers": [], "coverage": "Resolved UTC window"}
+
+    wallet = "0x" + "11" * 20
+    anchor = "2026-11-20 06:44"
+    app = ui.InboxUI(object(), Recording())
+    monkeypatch.setattr(app, "render", lambda: None)
+    app.wallet_input.value = wallet
+    app.history_ending.value = "time"
+    app.end_time.value = anchor
+    await app.scan()
+    assert app.lookup_line() == "Resolving the UTC cutoff for 0x1111…1111"
+
+    app.wallet_input.value = "0x" + "22" * 20
+    app.history_ending.value = "block"
+    app.end_block.value = "42"
+    await app.retry()
+    app.end_time.value = "2026-11-21 00:00"
+    await app.widen()
+    assert calls == [(wallet, blocks, {"end_time": anchor}) for blocks in (2000, 2000, 10_000)]
+
+
+async def test_invalid_hidden_block_opens_history_options(monkeypatch):
+    app = ui.InboxUI(object(), RecordingService())
+    monkeypatch.setattr(app, "render", lambda: None)
+    app.wallet_input.value = "0x" + "11" * 20
+    app.history_ending.value = "block"
+    app.end_block.value = "bad-block"
+
+    await app.scan()
+    assert app.show_history and app.input_error_field is app.end_block
+    assert app.input_error_text.visible and not app.state.error
+    assert app.input_error_notice.visible and app.input_error_notice.live_region
 
 
 def test_clear_filter_restores_every_transfer(monkeypatch):
