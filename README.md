@@ -6,9 +6,30 @@ Rebound finds interrupted USDC transfers from a public wallet address. It checks
 
 Read the [PRD](docs/PRD.md), [implementation and release plan](docs/superpowers/plans/2026-11-19-rebound.md), [live demo procedure](docs/DEMO.md), [controlled testnet lab](docs/LAB.md) and [QuickNode setup](docs/QUICKNODE.md).
 
-![Rebound transfer workspace showing labeled synthetic examples](docs/images/workspace.jpg)
+![Rebound inspector showing the live 1 USDC transfer: Base Sepolia burn verified, Circle attestation matched, Arc mint completed 99 s after the burn](docs/images/live-completed-case.jpg)
 
-## How Rebound works
+*Live Base Sepolia and Arc Testnet data, captured November 20, 2026.*
+
+## Submission at a glance
+
+| Field | Entry |
+|---|---|
+| Team | Siddartha Kodithyala, Anay Goyal, Areeb Hirani, Parth Patel |
+| Main track | DeFi and Onchain Applications |
+| Chain award | Best use of Arc |
+| Bounties | None claimed. The QuickNode Streams adapter is implemented, but live provider delivery of a real burn is still pending ([status](#quicknode-streams-integration)). |
+| Demo video | VIDEO_LINK_TBD |
+| Live evidence | [Base Sepolia source burn](https://sepolia.basescan.org/tx/0x7e4334109c120f9da71e01116190804a9d91f2fd5ec07cfd7196a649e68e3f23) → [Arc Testnet mint](https://explorer.testnet.arc.io/tx/0x92020b4554591c5afc4ae31aff0a8906fc19d1a17f2bd1773e1592762ea0a0a5), 99 s apart, then a refused duplicate. [Full record](docs/LIVE-RECOVERY.md) |
+| Contracts | Existing Circle CCTP V2 contracts on Base Sepolia and Arc Testnet. [Addresses](#contracts-used) |
+| Economics and risks | [Economic design and risks](#economic-design-and-risks) |
+
+## How it works
+
+1. **Find.** Enter a public wallet address. Rebound scans Circle TokenMessengerV2 `DepositForBurn` events on Base Sepolia where the address is the depositor or the mint recipient, and states the exact block range searched.
+2. **Verify the source.** It re-fetches the canonical Base Sepolia receipt and checks the burn is still at its position in the canonical block.
+3. **Match Circle.** It pulls the signed message from Circle's attestation API and compares amount, recipient, caller restriction, fee, finality and hook against the original burn.
+4. **Read Arc.** It reads `usedNonces` on Arc's MessageTransmitterV2. A used nonce means Completed, whatever Circle's status says; an unused nonce with a valid attestation means Ready to finish.
+5. **Finish once.** For a ready transfer, it simulates `receiveMessage(message, attestation)` on Arc from your caller and shows the unsigned transaction. The local CLI signs and broadcasts once after explicit approval, then checks the Arc `MessageReceived` event against the original nonce.
 
 ![Where USDC gets stuck: CCTP burns on Base, Circle attests, and the Arc mint is never submitted when the session is lost](docs/images/devpost/08-where-usdc-gets-stuck.png)
 
@@ -18,76 +39,15 @@ Read the [PRD](docs/PRD.md), [implementation and release plan](docs/superpowers/
 
 ![Status map: Source confirming, Waiting for Circle, Ready to finish and Completed, plus every other outcome with its next step](docs/images/devpost/11-status-map.png)
 
-## QuickNode Streams integration
+## Try it in two minutes
 
-Rebound integrates QuickNode Streams to help users find interrupted USDC transfers with just a public wallet address. A configured Stream can monitor Base Sepolia for Circle CCTP V2 USDC burn events and send matching events to Rebound’s authenticated webhook. Independent observation of a real burn arriving from the provider remains pending.
+After [running locally](#run-locally), follow the same steps as the demo video. Everything below reads public testnet state; nothing is signed in the browser.
 
-The public preview requires no credentials, wallet connection or QuickNode account. Enter a public testnet address only. Provider setup is an operator task; tokens and optional private RPC URLs stay in server environment variables.
-
-**Why QuickNode Streams.** A user who lost their session may have only an address. RPC history scans are bounded by a selected window and provider retention or query limits. A configured Stream can filter incoming blocks and persist matching burns for later wallet lookup. An index lookup reads the database, then checks the source receipt, Circle and Arc independently.
-
-When a user selects **Search Stream index**, Rebound looks up events associated with their wallet in the persisted Stream index and checks the original burn receipt, Circle’s attestation, and Arc’s on-chain state. This search reads the index only and does not fall back to a source RPC history scan. The user can see whether the transfer is pending, ready to finish, or already complete without looking up the original transaction hash.
-
-```mermaid
-flowchart LR
-    A["Base Sepolia<br/>USDC burn to Arc"] --> B["QuickNode Stream<br/>CCTP V2 burn filter"]
-    B --> C["Signed webhook<br/>POST /api/streams"]
-    C --> D[("Persisted<br/>Stream index")]
-    D --> E["Wallet inbox<br/>Search Stream index"]
-    E --> F{"Verify each burn"}
-    F --> G["Source receipt"]
-    F --> H["Circle attestation"]
-    F --> I["Arc nonce state"]
-    G --> J["Status shown<br/>to the user"]
-    H --> J
-    I --> J
-```
-
-| Setting | Value | Why it matters |
-|---|---|---|
-| Network | Base Sepolia (chain 84532) | Circle’s TokenMessengerV2 emits the burn here. |
-| Dataset | Block with Receipts (`block_with_receipts`) | The filter reads raw logs from each receipt, so it sees the burn without extra RPC calls. |
-| Filter | [`streams/filter.js`](streams/filter.js): successful receipt, TokenMessengerV2 address, `DepositForBurn` topic and native Base Sepolia USDC topic | Only canonical USDC burns are delivered. Blocks with no match are not delivered. The Python decoder still enforces the Arc destination and message fields. |
-| Webhook | `POST /api/streams`, HMAC over nonce, timestamp and body, 15 minute window, plain or gzip JSON | In signature mode, the configured Security token authenticates the payload. Shared-secret mode is reserved for local adapter checks. |
-| Index | SQLite, with the delivery time and signature status of each burn | The wallet search needs no RPC history scan and can say how each result arrived. |
-
-**Author-recorded dashboard snapshot (2026-11-20).** The same record is bundled in [`rebound/stream_record.json`](rebound/stream_record.json). It is a dated contributor report, not a live dashboard query or an independently verified current provider status.
-
-| Field | Reported value |
-|---|---|
-| Name / Stream ID | Rebound Base Sepolia burns / `c797f5ca-9aa8-4874-b8f1-a291a4066f27` |
-| Source | Base Sepolia, Block with Receipts |
-| Start / batches | Block 61,159,868, no end, batches of 1 |
-| Filter / destination | Author reports `streams/filter.js` and `POST /api/streams` with token authentication |
-| State recorded on 2026-11-20 | **Terminated**; last reported block 61,175,720; 15,861 blocks processed, 0 blocks sent, 8 errors |
-
-The last reported block precedes the controlled burn at 61,175,721. This snapshot does not establish the cause of termination or that zero sends means zero matching burns. It supplies no successful provider delivery record for the controlled burn. Current state and end-to-end provider delivery remain unverified.
-
-How a result is labelled depends on how it arrived:
-
-| Delivery | Label in the inspector | Independently proves provider delivery |
-|---|---|---|
-| Valid HMAC using the configured token and matching block hash | **Authenticated Stream payload** | No; a local signed replay can pass the same checks |
-| Fresh local shared-secret record (`REBOUND_STREAM_SECRET`) | **Shared-secret adapter payload** | No; an existing authenticated record retains its earlier authentication evidence |
-| Legacy record without stored receipt time or HMAC evidence | **Stream endpoint record** | No |
-| Demo wallet fixture | Simulated Stream delivery | No |
-
-For a Stream-found transfer the inspector separates the source burn, authenticated payload and transfer status evidence: the Base Sepolia block, a link to the original burn, the endpoint receipt time, and the source, Circle and Arc checks. **Authenticated Stream payload** means that the configured token validated the payload and its block hash matched. It does not establish who sent the request. Provider observation requires a separate matching dashboard delivery record and canonical source receipt. QuickNode does not report block coverage to Rebound, so an empty result is not proof that no transfer exists.
-
-**Validation status.** The checks are tracked separately. Simulations and the local adapter are never counted as a live delivery.
-
-| Check | Result | Evidence | Status |
-|---|---|---|---|
-| Signed sample delivery | QuickNode **Send Payload** passed | [Webhook setup test](docs/QUICKNODE.md#webhook-setup-test) | Observed |
-| Stream configuration and state | Author-recorded dashboard snapshot above; current state not independently verified | `rebound/stream_record.json`, dated 2026-11-20 | Reported snapshot |
-| Filter contract | Constants match the protocol, and the filter keeps only successful canonical USDC burns | `tests/test_quicknode.py` | Verified |
-| Simulated delivery | Synthetic example shows the labelled flow | Demo wallet, **Show simulated Stream delivery** | Simulated |
-| Local adapter delivery | Real controlled burn (block 61,175,721, log 4) passed through a locally signed gzip replay and wallet-only index lookup; source receipt, Circle attestation and completed Arc mint matched | Local run, 2026-11-20; authentication is endpoint evidence only | Verified as adapter test |
-| Live Stream delivery of a real burn | Not yet independently observed | Needs a matching provider dashboard delivery record, endpoint payload and canonical source receipt | Pending |
-| Wallet-only discovery from a live delivery | Not yet observed | Follows the live delivery | Pending |
-| Completed Arc mint tied to a live delivery | The controlled burn’s mint is complete ([evidence](docs/LIVE-RECOVERY.md)) but is not yet tied to a live delivery | Follows the live delivery | Pending |
-
-See the [QuickNode setup guide](docs/QUICKNODE.md) for configuration and verification steps, and the [recording sequence](docs/DEMO.md#quicknode-streams-walkthrough).
+1. **Find by address.** Open `http://127.0.0.1:8765`, paste `0x395809d8da4a70145d5060448070a15367df722c` and select **Check a live sample**. Rebound scans a fixed 200-block Base Sepolia window ending at block 61,175,721 and finds the controlled 1 USDC transfer.
+2. **Read the proof.** Select the row. The inspector shows the verified Base burn, the matched Circle attestation and the completed Arc mint, 99 s after the burn, with a link to the verified Arc receipt.
+3. **Review a recovery.** Open `http://127.0.0.1:8765/transfer/0x9064f18850c6a86cdea854175835f8eabb3a20eb06a2f1598f6fa0675cc950b5/5`, a second real burn that was still unminted on November 20. Under **Finish the transfer**, enter `0x395809d8da4a70145d5060448070a15367df722c` and select **Review recovery**. Rebound simulates `receiveMessage` on Arc and shows the unsigned transaction and gas budget in USDC. If someone has finished it since, the inspector shows **Completed** instead.
+4. **See the duplicate refusal.** Run `uv run python -m rebound.cli prepare 0x7e4334109c120f9da71e01116190804a9d91f2fd5ec07cfd7196a649e68e3f23 4 --caller 0x395809d8da4a70145d5060448070a15367df722c`. It exits with "Transfer is completed. Arc has already consumed this message's nonce."
+5. **Explore every state.** Open `http://127.0.0.1:8765/demo` for clearly labelled synthetic examples of Waiting for Circle, Caller required and the other states.
 
 ## Run locally
 
@@ -211,9 +171,9 @@ Local Python CLI ────┘          │          ├─ Circle sandbox att
 |---|---|
 | Source | Base Sepolia, chain `84532`, CCTP domain `6` |
 | Destination | Arc Testnet, chain `5042002`, CCTP domain `26` |
-| Source USDC | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` |
-| TokenMessengerV2 | `0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA` |
-| MessageTransmitterV2 | `0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275` |
+| Source USDC (Base Sepolia) | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` |
+| TokenMessengerV2 (Base Sepolia, emits `DepositForBurn`) | `0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA` |
+| MessageTransmitterV2 (Arc Testnet, `usedNonces` and `receiveMessage`) | `0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275` |
 | Attestation service | `https://iris-api-sandbox.circle.com` |
 
 These are existing Circle contracts; Rebound has not deployed a new protocol. See the [canonical addresses](https://developers.circle.com/cctp/references/contract-addresses) and [message source](https://github.com/circlefin/evm-cctp-contracts/tree/master/src/messages/v2). Network IDs and deployed bytecode are checked before use. CCTP itself enforces one successful mint per nonce; Rebound does not invent that guarantee. Racing or reverted transactions can still consume gas.
@@ -226,6 +186,87 @@ These are existing Circle contracts; Rebound has not deployed a new protocol. Se
 - **Dependencies.** The flow depends on a canonical confirmed source receipt, Circle’s valid attestation, current Arc chain state and a funded authorized caller. The app bounds discovery to the displayed coverage and checks the original destination caller before simulation.
 
 **UBC track fit.** DeFi and Onchain Applications with Best Use of Arc is the planned entry. The organizer’s guide includes CCTP cross-chain flows in DeFi and allows existing Arc contracts. QuickNode Streams requires a configured live source and destination. [Official hackathon guide](https://docs.google.com/document/d/1QaySCo7u3VxMVNdk3C5Ab3ewc2E46AuLntti-Uzx5EY/edit)
+
+## How Rebound uses Arc
+
+Arc Testnet (chain `5042002`, CCTP domain `26`) is where every transfer Rebound handles settles. The core decisions are made from Arc state:
+
+- **Completed or not.** Rebound calls `usedNonces(nonce)` on Arc's MessageTransmitterV2 (`0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275`). A consumed nonce means the mint already happened, so Rebound refuses to prepare another one. It reads the message's expiry block against the current Arc block.
+- **Finishing the original mint.** For a ready transfer, Rebound simulates `receiveMessage(message, attestation)` on Arc from the caller's address and returns the unsigned zero-value transaction for chain `5042002`. The local CLI signs and submits it once.
+- **USDC as gas.** Arc's native gas token is USDC, so the review shows the caller's Arc balance (18-decimal native units) and the gas budget in USDC, next to Circle's protocol fee and the net mint. Fees and balances stay in one stable unit.
+- **Receipt proof.** After a mint, Rebound checks the Arc receipt for a `MessageReceived` event matching the original nonce and message body before linking to it. The chain ID and deployed bytecode of the Arc contract are checked before each use (`/api/ready` reports this).
+- **Live run.** The controlled transfer was minted on Arc in [`0x9202…a0a5`](https://explorer.testnet.arc.io/tx/0x92020b4554591c5afc4ae31aff0a8906fc19d1a17f2bd1773e1592762ea0a0a5), 99 seconds after its [Base Sepolia burn](https://sepolia.basescan.org/tx/0x7e4334109c120f9da71e01116190804a9d91f2fd5ec07cfd7196a649e68e3f23). A second preparation was refused because the Arc nonce was used.
+
+## QuickNode Streams integration
+
+Rebound integrates QuickNode Streams to help users find interrupted USDC transfers with just a public wallet address. A configured Stream can monitor Base Sepolia for Circle CCTP V2 USDC burn events and send matching events to Rebound’s authenticated webhook. Independent observation of a real burn arriving from the provider remains pending.
+
+The public preview requires no credentials, wallet connection or QuickNode account. Enter a public testnet address only. Provider setup is an operator task; tokens and optional private RPC URLs stay in server environment variables.
+
+**Why QuickNode Streams.** A user who lost their session may have only an address. RPC history scans are bounded by a selected window and provider retention or query limits. A configured Stream can filter incoming blocks and persist matching burns for later wallet lookup. An index lookup reads the database, then checks the source receipt, Circle and Arc independently.
+
+When a user selects **Search Stream index**, Rebound looks up events associated with their wallet in the persisted Stream index and checks the original burn receipt, Circle’s attestation, and Arc’s on-chain state. This search reads the index only and does not fall back to a source RPC history scan. The user can see whether the transfer is pending, ready to finish, or already complete without looking up the original transaction hash.
+
+```mermaid
+flowchart LR
+    A["Base Sepolia<br/>USDC burn to Arc"] --> B["QuickNode Stream<br/>CCTP V2 burn filter"]
+    B --> C["Signed webhook<br/>POST /api/streams"]
+    C --> D[("Persisted<br/>Stream index")]
+    D --> E["Wallet inbox<br/>Search Stream index"]
+    E --> F{"Verify each burn"}
+    F --> G["Source receipt"]
+    F --> H["Circle attestation"]
+    F --> I["Arc nonce state"]
+    G --> J["Status shown<br/>to the user"]
+    H --> J
+    I --> J
+```
+
+| Setting | Value | Why it matters |
+|---|---|---|
+| Network | Base Sepolia (chain 84532) | Circle’s TokenMessengerV2 emits the burn here. |
+| Dataset | Block with Receipts (`block_with_receipts`) | The filter reads raw logs from each receipt, so it sees the burn without extra RPC calls. |
+| Filter | [`streams/filter.js`](streams/filter.js): successful receipt, TokenMessengerV2 address, `DepositForBurn` topic and native Base Sepolia USDC topic | Only canonical USDC burns are delivered. Blocks with no match are not delivered. The Python decoder still enforces the Arc destination and message fields. |
+| Webhook | `POST /api/streams`, HMAC over nonce, timestamp and body, 15 minute window, plain or gzip JSON | In signature mode, the configured Security token authenticates the payload. Shared-secret mode is reserved for local adapter checks. |
+| Index | SQLite, with the delivery time and signature status of each burn | The wallet search needs no RPC history scan and can say how each result arrived. |
+
+**Author-recorded dashboard snapshot (2026-11-20).** The same record is bundled in [`rebound/stream_record.json`](rebound/stream_record.json). It is a dated contributor report, not a live dashboard query or an independently verified current provider status.
+
+| Field | Reported value |
+|---|---|
+| Name / Stream ID | Rebound Base Sepolia burns / `c797f5ca-9aa8-4874-b8f1-a291a4066f27` |
+| Source | Base Sepolia, Block with Receipts |
+| Start / batches | Block 61,159,868, no end, batches of 1 |
+| Filter / destination | Author reports `streams/filter.js` and `POST /api/streams` with token authentication |
+| State recorded on 2026-11-20 | **Terminated**; last reported block 61,175,720; 15,861 blocks processed, 0 blocks sent, 8 errors |
+
+The last reported block precedes the controlled burn at 61,175,721. This snapshot does not establish the cause of termination or that zero sends means zero matching burns. It supplies no successful provider delivery record for the controlled burn. Current state and end-to-end provider delivery remain unverified.
+
+How a result is labelled depends on how it arrived:
+
+| Delivery | Label in the inspector | Independently proves provider delivery |
+|---|---|---|
+| Valid HMAC using the configured token and matching block hash | **Authenticated Stream payload** | No; a local signed replay can pass the same checks |
+| Fresh local shared-secret record (`REBOUND_STREAM_SECRET`) | **Shared-secret adapter payload** | No; an existing authenticated record retains its earlier authentication evidence |
+| Legacy record without stored receipt time or HMAC evidence | **Stream endpoint record** | No |
+| Demo wallet fixture | Simulated Stream delivery | No |
+
+For a Stream-found transfer the inspector separates the source burn, authenticated payload and transfer status evidence: the Base Sepolia block, a link to the original burn, the endpoint receipt time, and the source, Circle and Arc checks. **Authenticated Stream payload** means that the configured token validated the payload and its block hash matched. It does not establish who sent the request. Provider observation requires a separate matching dashboard delivery record and canonical source receipt. QuickNode does not report block coverage to Rebound, so an empty result is not proof that no transfer exists.
+
+**Validation status.** The checks are tracked separately. Simulations and the local adapter are never counted as a live delivery.
+
+| Check | Result | Evidence | Status |
+|---|---|---|---|
+| Signed sample delivery | QuickNode **Send Payload** passed | [Webhook setup test](docs/QUICKNODE.md#webhook-setup-test) | Observed |
+| Stream configuration and state | Author-recorded dashboard snapshot above; current state not independently verified | `rebound/stream_record.json`, dated 2026-11-20 | Reported snapshot |
+| Filter contract | Constants match the protocol, and the filter keeps only successful canonical USDC burns | `tests/test_quicknode.py` | Verified |
+| Simulated delivery | Synthetic example shows the labelled flow | Demo wallet, **Show simulated Stream delivery** | Simulated |
+| Local adapter delivery | Real controlled burn (block 61,175,721, log 4) passed through a locally signed gzip replay and wallet-only index lookup; source receipt, Circle attestation and completed Arc mint matched | Local run, 2026-11-20; authentication is endpoint evidence only | Verified as adapter test |
+| Live Stream delivery of a real burn | Not yet independently observed | Needs a matching provider dashboard delivery record, endpoint payload and canonical source receipt | Pending |
+| Wallet-only discovery from a live delivery | Not yet observed | Follows the live delivery | Pending |
+| Completed Arc mint tied to a live delivery | The controlled burn’s mint is complete ([evidence](docs/LIVE-RECOVERY.md)) but is not yet tied to a live delivery | Follows the live delivery | Pending |
+
+See the [QuickNode setup guide](docs/QUICKNODE.md) for configuration and verification steps, and the [recording sequence](docs/DEMO.md#quicknode-streams-walkthrough).
 
 ## Checks
 
