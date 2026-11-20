@@ -97,6 +97,10 @@ def create_app(recovery: RecoveryService | None = None, *, include_ui: bool = Tr
     async def transaction(tx_hash: str, log_index: Annotated[int | None, Query(ge=0)] = None):
         return await checked(recovery.inspect_transaction(tx_hash, log_index=log_index))
 
+    @api.get("/api/transactions/{tx_hash}/replay")
+    async def replay(tx_hash: str, log_index: Annotated[int, Query(ge=0)]):
+        return await checked(recovery.replay_mint(tx_hash, log_index))
+
     @api.post("/api/streams")
     async def stream(request: Request, x_rebound_secret: Annotated[str | None, Header()] = None):
         settings = recovery.settings

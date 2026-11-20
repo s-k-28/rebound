@@ -197,6 +197,10 @@ class InboxUI:
         self.preparing = False
         self.refreshing = False
         self.refresh_error = ""
+        self.replaying = False
+        self.replay_item = None
+        self.replay_result = None
+        self.replay_error = ""
         self.root = ft.Row(expand=True, spacing=0, vertical_alignment=ft.CrossAxisAlignment.STRETCH)
         self.search_input = ft.TextField(hint_text="Search transfers", prefix_icon=ft.Icons.SEARCH_ROUNDED,
             text_size=12, height=40, width=210, filled=True, fill_color="#F4F6F3",
@@ -715,6 +719,19 @@ class InboxUI:
                             icon=ft.Icons.REFRESH_ROUNDED))
             if self.refresh_error:
                 controls.append(self.text(self.refresh_error, 13, "#AE3434"))
+        if (not self.state.example and item["status"] == "completed"
+                and item.get("destination_url") and not item.get("delivery_mode")):
+            controls.append(self.button("Replaying mint…" if self.replaying else "Replay historical mint",
+                            self.replay_mint, icon=ft.Icons.HISTORY_ROUNDED, disabled=self.replaying))
+            if self.replay_item is item and self.replay_result:
+                proof = self.replay_result
+                controls.extend([
+                    self.value_line(f"Arc block {proof['previous_block']:,}", "Nonce unused · mint simulation passed"),
+                    self.value_line(f"Arc block {proof['mint_block']:,}", "Nonce consumed · receipt verified"),
+                    self.text("Replay used historical chain reads and simulation.", 11, MUTED),
+                ])
+            if self.replay_item is item and self.replay_error:
+                controls.append(self.text(self.replay_error, 13, "#AE3434"))
         return ft.Container(ft.Column(controls, spacing=16,
                             horizontal_alignment=ft.CrossAxisAlignment.STRETCH), padding=22,
                             border=ft.Border(top=ft.BorderSide(1, LINE)))
@@ -837,6 +854,23 @@ class InboxUI:
                 self.refresh_error = f"Refresh failed. Showing the previous result. {safe_error(exc)}"
         finally:
             self.refreshing = False
+            self.render()
+
+    async def replay_mint(self, _=None) -> None:
+        item = self.state.selected
+        if self.replaying or item is None or self.state.example or item.get("status") != "completed":
+            return
+        self.replaying = True
+        self.replay_item = item
+        self.replay_result = None
+        self.replay_error = ""
+        self.render()
+        try:
+            self.replay_result = await self.service.replay_mint(item["tx_hash"], item["log_index"])
+        except Exception as exc:
+            self.replay_error = safe_error(exc)
+        finally:
+            self.replaying = False
             self.render()
 
     def toggle_transaction(self, _=None) -> None:

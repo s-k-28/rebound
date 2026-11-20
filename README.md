@@ -38,6 +38,7 @@ uv run python -m rebound.cli --help
 uv run python -m rebound.cli scan "$WALLET_ADDRESS" --blocks 2000
 uv run python -m rebound.cli scan "$WALLET_ADDRESS" --blocks 200 --end-block 61125511
 uv run python -m rebound.cli inspect "$BURN_TX_HASH"
+uv run python -m rebound.cli replay "$BURN_TX_HASH" "$LOG_INDEX"
 uv run python -m rebound.cli prepare "$BURN_TX_HASH" "$LOG_INDEX" --caller "$CALLER_ADDRESS"
 ```
 
@@ -48,6 +49,8 @@ Use **History options** in the browser or `--end-block` in the CLI to revisit a 
 **Refresh this transfer** rechecks the selected source receipt, matching Circle message and Arc nonce without rerunning the wallet scan. **Copy evidence** copies the public transfer identifiers, amounts, verification time and receipt links for a support ticket or demo.
 
 **Copy live case link** opens the exact source transaction and event index on the same Rebound deployment. The recipient of the link gets a fresh chain check.
+
+For a completed direct mint, **Replay historical mint** verifies the original receipt, reads the nonce at the previous block and the receipt block, then simulates the same attestation against the previous block. The replay requires an Arc RPC that serves historical state and uses reads only.
 
 ### Complete a transfer locally
 

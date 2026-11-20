@@ -181,6 +181,60 @@ async def test_unrelated_wallet_is_not_attributed_a_transfer(setup_service):
     assert (await app.scan(OTHER, blocks=150))["transfers"] == []
 
 
+@pytest.mark.parametrize("failure", [None, "already_used", "failed_simulation", "wrong_block_hash"])
+async def test_replay_pins_nonce_and_simulation_to_canonical_historical_blocks(setup_service, failure):
+    from rebound import protocol as p
+    from tests.test_protocol import word_address
+
+    app, state = setup_service
+    source_hash, arc_hash = "0x" + "cd" * 32, "0x" + "42" * 32
+    block_hash = "0x" + "bc" * 32
+    raw = message_hex()
+    signature = "0x" + "11" * 65
+    message = p.decode_message(raw)
+    state["messages"] = [{"status": "complete", "message": raw, "attestation": signature,
+                          "destinationMintTxHash": arc_hash}]
+    receipt = {
+        "transactionHash": arc_hash, "status": "0x1", "to": p.TRANSMITTER, "from": WALLET,
+        "blockNumber": hex(700), "blockHash": block_hash,
+        "logs": [{
+            "address": p.TRANSMITTER,
+            "topics": [p.RECEIVED_TOPIC, "0x" + word_address(WALLET).hex(), message.nonce,
+                       "0x" + (2000).to_bytes(32, "big").hex()],
+            "data": "0x" + encode(["uint32", "bytes32", "bytes"],
+                                  [6, word_address(p.MESSENGER), bytes.fromhex(raw[2:])[148:]]).hex(),
+        }],
+    }
+    original = app.arc.call
+
+    async def historical_arc(method, params=None):
+        if method == "eth_getTransactionReceipt":
+            assert params == [arc_hash]
+            return receipt
+        if method == "eth_getBlockByNumber":
+            assert params == [hex(700), False]
+            return {"hash": "0x" + "ff" * 32 if failure == "wrong_block_hash" else block_hash}
+        if method == "eth_call":
+            payload, block = params
+            if payload["data"] == p.used_nonce_calldata(message.nonce):
+                assert block in {hex(699), hex(700)}
+                return hex(int(block == hex(700) or failure == "already_used"))
+            assert block == hex(699) and payload["from"] == WALLET
+            assert payload["data"] == p.receive_calldata(raw, signature)
+            return "0x0" if failure == "failed_simulation" else "0x1"
+        return await original(method, params)
+
+    app.arc.call = historical_arc
+    if failure:
+        with pytest.raises(ValueError, match="historical nonce|mint simulation|canonical Arc"):
+            await app.replay_mint(source_hash, 3)
+    else:
+        replay = await app.replay_mint(source_hash, 3)
+        assert replay["previous_block"] == 699 and replay["mint_block"] == 700
+        assert not replay["nonce_used_before"] and replay["nonce_used_at_mint"]
+        assert replay["receive_simulated"] and replay["arc_tx_hash"] == arc_hash
+
+
 @pytest.mark.parametrize("used,expected_state", [(False, "managed_delivery"), (True, "completed")])
 async def test_forwarded_app_hook_is_inspected_without_preparing_recovery(setup_service, used, expected_state):
     app, state = setup_service

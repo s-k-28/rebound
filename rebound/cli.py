@@ -206,6 +206,9 @@ def parser() -> argparse.ArgumentParser:
     index.add_argument("wallet")
     lookup = commands.add_parser("inspect", help="Find supported burns within one Base Sepolia receipt")
     lookup.add_argument("tx_hash", help="Original Base Sepolia transaction hash")
+    replay = commands.add_parser("replay", help="Verify a historical mint without submitting a transaction")
+    replay.add_argument("tx_hash", help="Original Base Sepolia transaction hash")
+    replay.add_argument("log_index", type=int, help="DepositForBurn log index")
     for name in ["prepare", "recover"]:
         command = commands.add_parser(
             name,
@@ -240,6 +243,8 @@ async def run(args: argparse.Namespace) -> dict:
             return await service.scan_stream(args.wallet)
         if args.command == "inspect":
             return await service.inspect_transaction(args.tx_hash)
+        if args.command == "replay":
+            return await service.replay_mint(args.tx_hash, args.log_index)
         if args.command == "prepare":
             return await service.prepare(args.tx_hash, args.log_index, args.caller)
         if not sys.stdin.isatty():

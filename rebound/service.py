@@ -344,7 +344,7 @@ class RecoveryService:
             return None
         raise ValueError("No unique attestation matches the exact original burn.")
 
-    async def _destination_receipt_url(self, hint: str | None, raw: str, message: p.Message) -> str | None:
+    async def _matching_arc_receipt(self, hint: str | None, attestation: Attestation) -> dict | None:
         if not hint:
             return None
         try:
@@ -352,21 +352,82 @@ class RecoveryService:
             receipt = await self.arc.call("eth_getTransactionReceipt", [tx_hash])
         except (ValueError, UpstreamError):
             return None
-        if p.matches_mint_receipt(receipt, tx_hash, raw, message):
-            return f"{p.ARC_EXPLORER}/tx/{tx_hash}"
+        if p.matches_mint_receipt(receipt, tx_hash, attestation.raw, attestation.message):
+            return receipt
         return None
+
+    async def _verified_arc_receipt(self, burn: p.Burn, attestation: Attestation) -> dict | None:
+        hint = attestation.receipt_hint
+        receipt = await self._matching_arc_receipt(hint, attestation)
+        if receipt is not None:
+            return receipt
+        local_hint = self.store.local_mint(burn, attestation.message.nonce)
+        if local_hint and local_hint != hint:
+            return await self._matching_arc_receipt(local_hint, attestation)
+        return None
+
+    async def _nonce_at(self, nonce: str, block: int) -> bool:
+        value = quantity(await self.arc.call("eth_call", [
+            {"to": p.TRANSMITTER, "data": p.used_nonce_calldata(nonce)}, hex(block),
+        ]))
+        if value not in (0, 1):
+            raise UpstreamError("Arc returned an unrecognized nonce state.")
+        return bool(value)
 
     async def _message_state(self, message: p.Message, caller: str | None = None) -> DestinationState:
         await self._verify_chain(self.arc, 5042002, p.TRANSMITTER)
         block = quantity(await self.arc.call("eth_blockNumber"))
-        consumed = await self.arc.call("eth_call", [
-            {"to": p.TRANSMITTER, "data": p.used_nonce_calldata(message.nonce)}, hex(block),
-        ])
-        used = quantity(consumed)
-        if used not in (0, 1):
-            raise UpstreamError("Arc returned an unrecognized nonce state.")
-        return DestinationState(p.classify(message, nonce_used=bool(used), destination_block=block, caller=caller),
-                                block, bool(used))
+        used = await self._nonce_at(message.nonce, block)
+        return DestinationState(p.classify(message, nonce_used=used, destination_block=block, caller=caller),
+                                block, used)
+
+    async def replay_mint(self, tx_hash: str, log_index: int) -> dict:
+        tx_hash = p.hash32(tx_hash)
+        if type(log_index) is not int or log_index < 0:
+            raise ValueError("Event log index must be a non-negative integer.")
+        async with self._read_slots:
+            await self._verify_chain(self.base, 84532, p.MESSENGER)
+            burn = await self._receipt_burn(tx_hash, log_index)
+            if burn.hook:
+                raise ValueError("Replay supports direct mints without delivery hooks.")
+            attestation = await self._matched_attestation(burn)
+            if attestation is None:
+                raise ValueError("Circle has not provided a matching attestation.")
+            await self._verify_chain(self.arc, 5042002, p.TRANSMITTER)
+            receipt = await self._verified_arc_receipt(burn, attestation)
+            if receipt is None or str(receipt.get("to", "")).lower() != p.TRANSMITTER:
+                raise ValueError("Replay requires a verified receipt for a direct Arc mint.")
+            mint_block = quantity(receipt.get("blockNumber"))
+            if mint_block < 1:
+                raise ValueError("The receipt has no valid previous block for replay.")
+            block = await self.arc.call("eth_getBlockByNumber", [hex(mint_block), False])
+            if not isinstance(block, dict) or p.hash32(block.get("hash")) != p.hash32(receipt.get("blockHash")):
+                raise ValueError("The mint receipt does not match its canonical Arc block.")
+            caller = p.address(receipt.get("from"))
+            message = attestation.message
+            if message.caller not in (p.ZERO, caller):
+                raise ValueError("The receipt caller differs from the attested caller.")
+            previous = mint_block - 1
+            try:
+                before, after = await _gather_reads(
+                    self._nonce_at(message.nonce, previous), self._nonce_at(message.nonce, mint_block),
+                )
+            except UpstreamError as exc:
+                raise UpstreamError("Arc could not supply the historical nonce state for this mint.") from exc
+            if before or not after:
+                raise ValueError("The historical nonce states do not match this mint receipt.")
+            transaction = {"from": caller, "to": p.TRANSMITTER, "value": "0x0",
+                           "data": p.receive_calldata(attestation.raw, attestation.signature)}
+            try:
+                simulation = quantity(await self.arc.call("eth_call", [transaction, hex(previous)]))
+            except UpstreamError as exc:
+                raise UpstreamError("Arc could not simulate the mint against the previous block.") from exc
+            if simulation != 1:
+                raise ValueError("The mint simulation did not succeed at the previous block.")
+            return {"source_tx_hash": tx_hash, "log_index": log_index, "nonce": message.nonce,
+                    "arc_tx_hash": p.hash32(receipt["transactionHash"]), "previous_block": previous,
+                    "mint_block": mint_block, "nonce_used_before": before, "nonce_used_at_mint": after,
+                    "receive_simulated": True}
 
     async def diagnose(self, burn: p.Burn, *, source_head: int | None = None, caller: str | None = None,
                        receipt_burns: list[p.Burn] | None = None) -> dict:
@@ -395,7 +456,7 @@ class RecoveryService:
             if attested is None:
                 status = "awaiting_attestation"
             else:
-                message, raw, receipt_hint = attested.message, attested.raw, attested.receipt_hint
+                message = attested.message
                 row.update(nonce=message.nonce, fee=p.usdc(message.fee), net_amount=p.usdc(message.amount - message.fee),
                            attestation_matched=True, expiration_block=message.expires_at)
                 if delivery_mode:
@@ -404,11 +465,9 @@ class RecoveryService:
                 row.update(destination_block=destination.block, nonce_used=destination.nonce_used)
                 status = destination.status
                 if status == "completed":
-                    row["destination_url"] = await self._destination_receipt_url(receipt_hint, raw, message)
-                    if row["destination_url"] is None:
-                        local_hint = self.store.local_mint(burn, message.nonce)
-                        if local_hint and local_hint != receipt_hint:
-                            row["destination_url"] = await self._destination_receipt_url(local_hint, raw, message)
+                    receipt = await self._verified_arc_receipt(burn, attested)
+                    if receipt is not None:
+                        row["destination_url"] = f"{p.ARC_EXPLORER}/tx/{p.hash32(receipt['transactionHash'])}"
                 elif delivery_mode:
                     status = "managed_delivery"
                 elif status == "ready":

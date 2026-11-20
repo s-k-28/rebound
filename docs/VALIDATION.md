@@ -38,9 +38,12 @@ Choose **Check a live sample** in the transfer inbox. The app fills the public w
 ```sh
 uv run python -m rebound.cli scan 0x41f7337769003aec9b0b20789403f8c741d7faad --blocks 200 --end-block 61125511
 uv run python -m rebound.cli inspect 0xcfe897ab891b667c9ae538d9d6713c02db167dfd0a058fc6c09313734de0ecbb
+uv run python -m rebound.cli replay 0xcfe897ab891b667c9ae538d9d6713c02db167dfd0a058fc6c09313734de0ecbb 4
 ```
 
-Both commands should report 1 USDC sent, 0.99987 USDC received and a completed Arc mint. Running `prepare` on the same hash and log 4 returned the completed-state refusal before producing an unsigned transaction.
+The scan and inspect commands report 1 USDC sent, 0.99987 USDC received and a completed Arc mint. Running `prepare` on the same hash and log 4 returned the completed-state refusal before producing an unsigned transaction.
+
+The read-only replay verified an unused nonce and a successful simulation at Arc block 73,127,413, then a consumed nonce and matching receipt at block 73,127,414. It used the historical public transfer above.
 
 ## Runtime checks and limits
 
