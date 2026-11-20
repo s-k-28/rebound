@@ -151,7 +151,12 @@ async def test_prepare_rechecks_nonce_instead_of_trusting_previous_ready(setup_s
         await app.prepare("0x" + "cd" * 32, 3, WALLET)
 
 
-@pytest.mark.parametrize("receipt_variant", ["matching", "wrong_nonce", "wrong_body", "reverted", "missing"])
+@pytest.mark.parametrize("receipt_variant", [
+    "matching", "wrong_nonce", "wrong_body", "reverted", "missing",
+    "reorged_block", "wrong_block_height", "missing_block_height", "missing_receipt_block",
+    "block_unavailable", "wrong_log_tx", "wrong_log_block_hash", "wrong_log_block_height",
+    "wrong_log_tx_index", "transaction_not_in_block", "missing_transactions",
+])
 @pytest.mark.parametrize("hint_from", ["circle", "local"])
 async def test_completed_links_only_to_a_matching_arc_receipt(setup_service, receipt_variant, hint_from):
     from rebound import protocol
@@ -170,20 +175,39 @@ async def test_completed_links_only_to_a_matching_arc_receipt(setup_service, rec
         app.store.remember_mint(burn.tx_hash, burn.log_index, message.nonce, tx_hash)
     state["messages"] = [row]
     body = bytes.fromhex(raw[2:])[148:]
+    block_hash = "0x" + "bc" * 32
     receipt = {"status": "0x0" if receipt_variant == "reverted" else "0x1", "transactionHash": tx_hash,
+               "blockNumber": "0x2bc", "blockHash": block_hash, "transactionIndex": "0x0",
                "logs": [{"address": protocol.TRANSMITTER,
+                         "transactionHash": "0x" + "fe" * 32 if receipt_variant == "wrong_log_tx" else tx_hash,
+                         "blockHash": "0x" + "fe" * 32 if receipt_variant == "wrong_log_block_hash" else block_hash,
+                         "blockNumber": "0x2bd" if receipt_variant == "wrong_log_block_height" else "0x2bc",
+                         "transactionIndex": "0x1" if receipt_variant == "wrong_log_tx_index" else "0x0",
                          "topics": [protocol.RECEIVED_TOPIC, "0x" + word_address(WALLET).hex(),
                                     "0x" + "ff" * 32 if receipt_variant == "wrong_nonce" else message.nonce,
                                     "0x" + (2000).to_bytes(32, "big").hex()],
                          "data": "0x" + encode(["uint32", "bytes32", "bytes"],
                                                [6, word_address(protocol.MESSENGER),
                                                 b"wrong" if receipt_variant == "wrong_body" else body]).hex()}]}
+    if receipt_variant == "missing_receipt_block":
+        receipt.pop("blockHash")
     original = app.arc.call
 
     async def arc_call(method, params=None):
         if method == "eth_getTransactionReceipt":
             assert params == [tx_hash]
             return None if receipt_variant == "missing" else receipt
+        if method == "eth_getBlockByNumber":
+            assert params == ["0x2bc", False]
+            if receipt_variant == "block_unavailable":
+                raise UpstreamError("Arc cannot provide this block.")
+            return {
+                "hash": "0x" + "ff" * 32 if receipt_variant == "reorged_block" else block_hash,
+                "number": None if receipt_variant == "missing_block_height" else "0x2bd" if receipt_variant == "wrong_block_height" else "0x2bc",
+                "transactions": None if receipt_variant == "missing_transactions" else [
+                    "0x" + "fe" * 32 if receipt_variant == "transaction_not_in_block" else tx_hash,
+                ],
+            }
         return await original(method, params)
 
     app.arc.call = arc_call
@@ -229,7 +253,8 @@ async def test_replay_pins_nonce_and_simulation_to_canonical_historical_blocks(s
             return receipt
         if method == "eth_getBlockByNumber":
             assert params == [hex(700), False]
-            return {"hash": "0x" + "ff" * 32 if failure == "wrong_block_hash" else block_hash}
+            return {"hash": "0x" + "ff" * 32 if failure == "wrong_block_hash" else block_hash,
+                    "number": hex(700), "transactions": [arc_hash]}
         if method == "eth_call":
             payload, block = params
             if payload["data"] == p.used_nonce_calldata(message.nonce):
@@ -242,7 +267,7 @@ async def test_replay_pins_nonce_and_simulation_to_canonical_historical_blocks(s
 
     app.arc.call = historical_arc
     if failure:
-        with pytest.raises(ValueError, match="historical nonce|mint simulation|canonical Arc"):
+        with pytest.raises(ValueError, match="historical nonce|mint simulation|canonical Arc|verified receipt"):
             await app.replay_mint(source_hash, 3)
     else:
         replay = await app.replay_mint(source_hash, 3)

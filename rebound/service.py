@@ -402,10 +402,47 @@ class RecoveryService:
         try:
             tx_hash = p.hash32(hint)
             receipt = await self.arc.call("eth_getTransactionReceipt", [tx_hash])
+            if not p.matches_mint_receipt(receipt, tx_hash, attestation.raw, attestation.message):
+                return None
+            block_number = quantity(receipt.get("blockNumber"))
+            block_hash = p.hash32(receipt.get("blockHash"))
+            block = await self.arc.call("eth_getBlockByNumber", [hex(block_number), False])
+            if (not isinstance(block, dict) or p.hash32(block.get("hash")) != block_hash
+                    or quantity(block.get("number")) != block_number):
+                return None
+            transaction_index = quantity(receipt["transactionIndex"]) if "transactionIndex" in receipt else None
+            transactions = block.get("transactions")
+            if not isinstance(transactions, list):
+                return None
+            hashes = [p.hash32(value) for value in transactions]
+            if transaction_index is None:
+                if tx_hash not in hashes:
+                    return None
+            elif transaction_index >= len(hashes) or hashes[transaction_index] != tx_hash:
+                return None
+
+            # Some RPCs omit redundant log metadata. When supplied, it must bind
+            # the matching MessageReceived event to this exact receipt and block.
+            linked_logs = []
+            for log in receipt["logs"]:
+                if not isinstance(log, dict):
+                    continue
+                try:
+                    if any(field in log and p.hash32(log[field]) != expected for field, expected in (
+                        ("transactionHash", tx_hash), ("blockHash", block_hash),
+                    )):
+                        continue
+                    if "blockNumber" in log and quantity(log["blockNumber"]) != block_number:
+                        continue
+                    if "transactionIndex" in log and quantity(log["transactionIndex"]) != transaction_index:
+                        continue
+                except (ValueError, UpstreamError):
+                    continue
+                linked_logs.append(log)
+            if p.matches_mint_receipt(receipt | {"logs": linked_logs}, tx_hash, attestation.raw, attestation.message):
+                return receipt
         except (ValueError, UpstreamError):
             return None
-        if p.matches_mint_receipt(receipt, tx_hash, attestation.raw, attestation.message):
-            return receipt
         return None
 
     async def _verified_arc_receipt(self, burn: p.Burn, attestation: Attestation) -> dict | None:
