@@ -1,0 +1,25 @@
+{
+  "id": "c797f5ca-9aa8-4874-b8f1-a291a4066f27",
+  "name": "Rebound Base Sepolia burns",
+  "network": "Base Sepolia",
+  "dataset": "Block with Receipts",
+  "dataset_id": "block_with_receipts",
+  "start_block": 61159868,
+  "end": "none",
+  "batch_size": 1,
+  "region": "USA East",
+  "plan": "Free",
+  "filter": "streams/filter.js",
+  "destination_path": "/api/streams",
+  "destination_auth": "QuickNode signature (security token)",
+  "controlled_burn_block": 61175721,
+  "recorded_at": "2026-11-20",
+  "recorded_from": "QuickNode dashboard, Stream overview and settings",
+  "observed": {
+    "status": "Terminated",
+    "last_block_delivered": 61175720,
+    "blocks_processed": 15861,
+    "blocks_sent": 0,
+    "errors": 8
+  }
+}

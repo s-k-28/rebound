@@ -189,7 +189,7 @@ def create_app(recovery: RecoveryService | None = None, *, include_ui: bool = Tr
                     payload = {"logs": rows}
             if not isinstance(payload, dict) or not isinstance(payload.get("logs"), list):
                 raise ValueError("Expected an object containing an event logs list.")
-            accepted = await asyncio.to_thread(recovery.ingest_logs, payload["logs"])
+            accepted = await asyncio.to_thread(recovery.ingest_logs, payload["logs"], signed=bool(signature_headers))
             return {"accepted": accepted,
                     "note": "Candidates only; chain verification is required before recovery."}
         except (ValueError, TypeError, RecursionError) as exc:
