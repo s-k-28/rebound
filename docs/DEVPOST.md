@@ -8,7 +8,7 @@ Rebound finds interrupted USDC transfers by wallet address, verifies their statu
 
 ## What did you build?
 
-Rebound is a recovery inbox for USDC that was burned on Base Sepolia but never minted on Arc Testnet. You enter a public wallet address. Rebound finds the CCTP burns from that address, matches each one to Circle's signed message, and reads Arc to see whether the mint already happened. Each transfer gets one plain status, such as Source confirming, Waiting for Circle, Ready to finish, Caller required, Attestation expired or Completed. [Status vocabulary](DESIGN.md#status-vocabulary)
+Rebound is a recovery inbox for USDC transfers from Base Sepolia to Arc Testnet. You enter a public wallet address. Rebound finds supported CCTP burns where that address deposited the USDC or is the mint recipient, matches each one to Circle's signed message, and checks the mint on Arc. Each transfer gets one plain status, such as Source confirming, Waiting for Circle, Ready to finish, Caller required, Attestation expired or Completed. [Status vocabulary](DESIGN.md#status-vocabulary)
 
 Transfers are listed in a ledger. Selecting one opens an inspector with three proof steps: the Base burn, Circle's attestation and the Arc mint. Each step shows its evidence, such as block numbers, hashes and nonces. The burn and mint steps also show the time recorded on that chain. For the controlled transfer it reads "Minted 06:45:12 UTC, 99 s after the burn". On a 390 px phone the rows stack and the inspector opens as a full-width sheet. [Inspector](DESIGN.md#inspector) · [Phone layout](DESIGN.md#mobile-390-px-portrait) · [Gallery](images/devpost/README.md)
 
@@ -38,7 +38,7 @@ Rebound uses Circle CCTP V2 and USDC, Arc Testnet, Circle's attestation API, Bas
 
 - **It starts from an address.** You do not need a transaction hash, a bridge link or the original app. To look further back, end the search at a Base Sepolia block or a UTC time.
 - **It cross-checks three sources.** Rebound combines the canonical Base receipt, Circle's matching attestation and Arc's current nonce state before showing a transfer as ready or completed.
-- **It shows when the burn and mint happened.** The times come from the Base and Arc blocks. An unfinished transfer shows how long it has been unfinished.
+- **It shows when the burn and mint happened.** The times come from the Base and Arc blocks. For waiting and ready transfers, the inspector shows the time since the burn.
 - **It completes the original mint.** The attestation fixes the recipient, and Arc allows one successful mint per CCTP nonce. Users can share a case pinned to the exact source event so someone else can recheck it.
 - **Agents can use it.** The read-only MCP tools return a `next_step` for each transfer and produce an unsigned preparation for eligible callers. `find_unfinished_transfers` accepts the same `end_block` or `end_time` cutoff as the inbox.
 
@@ -57,12 +57,12 @@ Upload in this order. Images 1 to 5 and 7 use live testnet data. Image 6 is synt
 | # | Image | Caption |
 |---|---|---|
 | 1 | [Ledger and inspector](images/devpost/01-ledger-inspector-completed.jpg) | Check a live sample finds the controlled 1 USDC transfer, burned at 06:43:33 UTC and minted on Arc 99 s later. |
-| 2 | [Ready to finish](images/devpost/02-ready-to-finish.jpg) | A case link opens a real 1 USDC burn that is ready to finish, with its proof, fixed recipient and amounts. |
+| 2 | [Ready to finish](images/devpost/02-ready-to-finish.jpg) | A case link shows the proof, fixed recipient and amounts for a real 1 USDC burn that was ready at capture. |
 | 3 | [Review recovery](images/devpost/03-review-recovery.jpg) | Review recovery rechecks the transfer, simulates the Arc mint and shows the unsigned transaction and gas budget without signing it. |
 | 4 | [History by UTC time](images/devpost/04-history-utc-cutoff.jpg) | A wallet lookup ending at 06:44 UTC scans 200 Base Sepolia blocks and finds the controlled transfer. |
-| 5 | [Phone](images/devpost/05-phone-inspector.jpg) | At 390 px, ledger rows stack and the inspector opens as a full-width sheet, shown on the real ready transfer. |
+| 5 | [Phone](images/devpost/05-phone-inspector.jpg) | At 390 px, ledger rows stack and the inspector opens the same case as a full-width sheet. |
 | 6 | [Examples](images/devpost/06-examples-synthetic.jpg) | Example mode shows Ready to finish, Waiting for Circle, Caller required and Completed with synthetic transfers that cannot be signed. |
-| 7 | [Recover command](images/devpost/07-recover-terminal.jpg) | Recorded output of the recover command from the November 20 controlled run, up to the confirmed Arc mint. |
+| 7 | [Recover command](images/devpost/07-recover-terminal.jpg) | Typeset terminal output from the November 20 controlled run, ending with the confirmed Arc mint. |
 
 ## Entry details
 

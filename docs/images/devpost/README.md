@@ -5,12 +5,12 @@ Upload these in order. Each caption is ready to paste into Devpost. All images a
 | # | File | Caption | Data |
 |---|---|---|---|
 | 1 | [01-ledger-inspector-completed.jpg](01-ledger-inspector-completed.jpg) | Check a live sample finds the controlled 1 USDC transfer, burned at 06:43:33 UTC and minted on Arc 99 s later. | Live: Base [`0x7e43…3f23`](https://sepolia.basescan.org/tx/0x7e4334109c120f9da71e01116190804a9d91f2fd5ec07cfd7196a649e68e3f23) log 4, Arc [`0x9202…a0a5`](https://explorer.testnet.arc.io/tx/0x92020b4554591c5afc4ae31aff0a8906fc19d1a17f2bd1773e1592762ea0a0a5) |
-| 2 | [02-ready-to-finish.jpg](02-ready-to-finish.jpg) | A case link opens a real 1 USDC burn that is ready to finish, with its proof, fixed recipient and amounts. | Live: Base [`0x9064…50b5`](https://sepolia.basescan.org/tx/0x9064f18850c6a86cdea854175835f8eabb3a20eb06a2f1598f6fa0675cc950b5) log 5, Arc nonce unused |
+| 2 | [02-ready-to-finish.jpg](02-ready-to-finish.jpg) | A case link shows the proof, fixed recipient and amounts for a real 1 USDC burn that was ready at capture. | Live: Base [`0x9064…50b5`](https://sepolia.basescan.org/tx/0x9064f18850c6a86cdea854175835f8eabb3a20eb06a2f1598f6fa0675cc950b5) log 5, Arc nonce unused at capture |
 | 3 | [03-review-recovery.jpg](03-review-recovery.jpg) | Review recovery rechecks the transfer, simulates the Arc mint and shows the unsigned transaction and gas budget without signing it. | Live: same burn, caller `0x3958…722c`; nothing was signed or sent |
 | 4 | [04-history-utc-cutoff.jpg](04-history-utc-cutoff.jpg) | A wallet lookup ending at 06:44 UTC scans 200 Base Sepolia blocks and finds the controlled transfer. | Live: blocks 61,175,661–61,175,860 |
-| 5 | [05-phone-inspector.jpg](05-phone-inspector.jpg) | At 390 px, ledger rows stack and the inspector opens as a full-width sheet, shown on the real ready transfer. | Live: same burn as image 2 |
+| 5 | [05-phone-inspector.jpg](05-phone-inspector.jpg) | At 390 px, ledger rows stack and the inspector opens the same case as a full-width sheet. | Live: same burn as image 2 |
 | 6 | [06-examples-synthetic.jpg](06-examples-synthetic.jpg) | Example mode shows Ready to finish, Waiting for Circle, Caller required and Completed with synthetic transfers that cannot be signed. | Synthetic: `rebound/examples.py` |
-| 7 | [07-recover-terminal.jpg](07-recover-terminal.jpg) | Recorded output of the recover command from the November 20 controlled run, up to the confirmed Arc mint. | Live run in [LIVE-RECOVERY.md](../../LIVE-RECOVERY.md#3-destination-mint) |
+| 7 | [07-recover-terminal.jpg](07-recover-terminal.jpg) | Typeset terminal output from the November 20 controlled run, ending with the confirmed Arc mint. | Live run in [LIVE-RECOVERY.md](../../LIVE-RECOVERY.md#3-destination-mint) |
 
 ## How they were made
 
