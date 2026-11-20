@@ -31,6 +31,14 @@ Read the [PRD](docs/PRD.md), [implementation and release plan](docs/superpowers/
 4. **Read Arc.** It reads `usedNonces` on Arc's MessageTransmitterV2. A used nonce means Completed, whatever Circle's status says; an unused nonce with a valid attestation means Ready to finish.
 5. **Finish once.** For a ready transfer, it simulates `receiveMessage(message, attestation)` on Arc from your caller and shows the unsigned transaction. The local CLI signs and broadcasts once after explicit approval, then checks the Arc `MessageReceived` event against the original nonce.
 
+![Where USDC gets stuck: CCTP burns on Base, Circle attests, and the Arc mint is never submitted when the session is lost](docs/images/devpost/08-where-usdc-gets-stuck.png)
+
+![How Rebound decides: discover burns by address, verify the canonical source receipt, match Circle's signed message, read Arc nonce state, then finish with a verified receipt](docs/images/devpost/09-how-rebound-decides.png)
+
+![Live testnet run on November 20: 1 USDC burned at 06:43:33 UTC, found from the wallet address, minted on Arc at 06:45:12 UTC, second attempt refused](docs/images/devpost/10-live-run.png)
+
+![Status map: Source confirming, Waiting for Circle, Ready to finish and Completed, plus every other outcome with its next step](docs/images/devpost/11-status-map.png)
+
 ## Try it in two minutes
 
 After [running locally](#run-locally), follow the same steps as the demo video. Everything below reads public testnet state; nothing is signed in the browser.

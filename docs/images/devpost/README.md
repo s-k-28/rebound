@@ -1,6 +1,6 @@
 # Devpost gallery
 
-Upload these in order. Each caption is ready to paste into Devpost. All images are 1500 × 1000 JPG.
+Upload these in order. Each caption is ready to paste into Devpost. All images are 1500 × 1000. Images 1–7 are JPG captures of the app; images 8–11 are PNG diagrams drawn from the recorded run and the source code.
 
 | # | File | Caption | Data |
 |---|---|---|---|
@@ -11,6 +11,10 @@ Upload these in order. Each caption is ready to paste into Devpost. All images a
 | 5 | [05-phone-inspector.jpg](05-phone-inspector.jpg) | At 390 px, ledger rows stack and the inspector opens the same case as a full-width sheet. | Live: same burn as image 2 |
 | 6 | [06-examples-synthetic.jpg](06-examples-synthetic.jpg) | Example mode shows Ready to finish, Waiting for Circle, Caller required and Completed with synthetic transfers that cannot be signed. | Synthetic: `rebound/examples.py` |
 | 7 | [07-recover-terminal.jpg](07-recover-terminal.jpg) | Typeset terminal output from the November 20 controlled run, ending with the confirmed Arc mint. | Live run in [LIVE-RECOVERY.md](../../LIVE-RECOVERY.md#3-destination-mint) |
+| 8 | [08-where-usdc-gets-stuck.png](08-where-usdc-gets-stuck.png) | CCTP moves USDC in three steps. If the session is lost after the burn, nobody submits the Arc mint. | Diagram: contract addresses from `README.md#contracts-used` |
+| 9 | [09-how-rebound-decides.png](09-how-rebound-decides.png) | Rebound marks a transfer Ready only when the Base receipt, Circle's signed message and Arc's nonce state agree. | Diagram: `rebound/service.py` checks |
+| 10 | [10-live-run.png](10-live-run.png) | November 20 testnet run: burned at 06:43:33 UTC, found from the address alone, minted on Arc 99 s later, second attempt refused. | Live: values from `docs/LIVE-RECOVERY.md` |
+| 11 | [11-status-map.png](11-status-map.png) | Every transfer gets one plain status with one next step. A used Arc nonce always means Completed. | Diagram: `docs/DESIGN.md#status-vocabulary` |
 
 ## How they were made
 

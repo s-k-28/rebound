@@ -52,7 +52,7 @@ Rebound uses Circle CCTP V2 and USDC, Arc Testnet, Circle's attestation API, Bas
 
 ## Gallery
 
-Upload in this order. Images 1 to 5 and 7 use live testnet data. Image 6 is synthetic, and the app labels it as an example. [Capture notes](images/devpost/README.md)
+Upload in this order. Images 1 to 5 and 7 use live testnet data. Image 6 is synthetic, and the app labels it as an example. Images 8 to 11 are diagrams; every number in them comes from the live run record. [Capture notes](images/devpost/README.md)
 
 | # | Image | Caption |
 |---|---|---|
@@ -63,6 +63,10 @@ Upload in this order. Images 1 to 5 and 7 use live testnet data. Image 6 is synt
 | 5 | [Phone](images/devpost/05-phone-inspector.jpg) | At 390 px, ledger rows stack and the inspector opens the same case as a full-width sheet. |
 | 6 | [Examples](images/devpost/06-examples-synthetic.jpg) | Example mode shows Ready to finish, Waiting for Circle, Caller required and Completed with synthetic transfers that cannot be signed. |
 | 7 | [Recover command](images/devpost/07-recover-terminal.jpg) | Typeset terminal output from the November 20 controlled run, ending with the confirmed Arc mint. |
+| 8 | [Where USDC gets stuck](images/devpost/08-where-usdc-gets-stuck.png) | CCTP moves USDC in three steps. If the session is lost after the burn, nobody submits the Arc mint. |
+| 9 | [How Rebound decides](images/devpost/09-how-rebound-decides.png) | Rebound marks a transfer Ready only when the Base receipt, Circle's signed message and Arc's nonce state agree. |
+| 10 | [Live run](images/devpost/10-live-run.png) | November 20 testnet run: burned at 06:43:33 UTC, found from the address alone, minted on Arc 99 s later, second attempt refused. |
+| 11 | [Status map](images/devpost/11-status-map.png) | Every transfer gets one plain status with one next step. A used Arc nonce always means Completed. |
 
 ## Entry details
 
@@ -76,6 +80,6 @@ Upload in this order. Images 1 to 5 and 7 use live testnet data. Image 6 is synt
 | Contracts and economics | [Technical README](../README.md#contracts-used) |
 | Demo evidence | [Controlled recovery](LIVE-RECOVERY.md) and [independent read-only replay](VALIDATION.md#reproduce-the-read-only-check) |
 | Agent tools | [MCP server](MCP.md) |
-| Gallery | [Seven images with captions](images/devpost/README.md) |
+| Gallery | [Eleven images with captions](images/devpost/README.md) |
 | Video | VIDEO_LINK_TBD |
 | Bounties | None claimed. QuickNode Streams adapter implemented ([why and Stream record](QUICKNODE.md#why-this-stream)); live delivery pending, so the bounty is not selected |
