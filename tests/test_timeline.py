@@ -1,9 +1,13 @@
 import asyncio
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
 from rebound import ui
+
+# A desktop-width page: layout helpers read page.width.
+DESKTOP_PAGE = SimpleNamespace(width=1440)
 
 BURNED_AT = "2026-11-20T06:43:33+00:00"  # Base Sepolia block 61,175,721
 MINTED_AT = "2026-11-20T06:45:12+00:00"  # Arc Testnet block 73,147,365
@@ -55,14 +59,14 @@ def test_burn_and_mint_times_come_from_block_timestamps():
     assert ui.burn_time(item, NOW) == "Burned 06:43:33 UTC, 2 h 14 min ago"
     assert ui.mint_time(item, NOW) == "Minted 06:45:12 UTC, 99 s after the burn"
     assert ui.mint_time(item | {"burned_at": None}, NOW) == "Minted 06:45:12 UTC"
-    lines = texts(ui.InboxUI(object(), object()).proof(item, NOW))
+    lines = texts(ui.InboxUI(DESKTOP_PAGE, object()).proof(item, NOW))
     assert lines.index("Burned 06:43:33 UTC, 2 h 14 min ago") < lines.index("Block 61,175,721, log 4")
     assert "Minted 06:45:12 UTC, 99 s after the burn" in lines
     assert "101 confirmations" in lines
 
 
 def test_mint_time_needs_the_verified_receipt_link_on_a_live_transfer():
-    app = ui.InboxUI(object(), object())
+    app = ui.InboxUI(DESKTOP_PAGE, object())
     unlinked = live("completed", minted_at=MINTED_AT)
     assert not any(line.startswith("Minted ") for line in texts(app.proof(unlinked, NOW)))
     example = unlinked | {"example": True, "destination_url": "https://explorer.testnet.arc.io/tx/0x" + "bb" * 32}
@@ -79,7 +83,7 @@ def test_stuck_duration_is_shown_only_for_unfinished_transfers(status, expected)
 
 
 def test_confirming_burn_shows_progress_toward_the_recovery_threshold():
-    app = ui.InboxUI(object(), object())
+    app = ui.InboxUI(DESKTOP_PAGE, object())
     assert "7 of 12 Base confirmations" in texts(app.proof(live("source_confirming", source_confirmations=7), NOW))
     assert "1,234 confirmations" in texts(app.proof(live("ready", source_confirmations=1234), NOW))
 
