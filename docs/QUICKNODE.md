@@ -46,9 +46,9 @@ A user who lost their session may have an address and no transaction hash. RPC d
 
 ## Showing the integration without a live delivery
 
-A recording can demonstrate the endpoint adapter without a live Stream. Use a fresh isolated local database for the expected label. In both terminals, have the same `REBOUND_STREAM_SECRET` already exported through your normal secret-management setup; do not put its value in a command, recording or public app. Unset `REBOUND_STREAM_SECURITY_TOKEN` for this shared-secret test, because a configured HMAC token takes precedence.
+The local adapter demonstrates Stream-index discovery. Use a fresh local database for the expected label. Export the same `REBOUND_STREAM_SECRET` in both terminals through your secret manager so it stays out of commands and recordings. The app gives the HMAC token precedence, so unset it for the shared-secret rehearsal.
 
-Start a separate local instance in terminal one:
+Start a separate local instance on an available port. This example uses port 8766.
 
 ```sh
 env -u REBOUND_STREAM_SECURITY_TOKEN \
@@ -56,15 +56,15 @@ env -u REBOUND_STREAM_SECURITY_TOKEN \
   uv run --locked uvicorn rebound.app:app --host 127.0.0.1 --port 8766
 ```
 
-In terminal two, from the repository root with the existing shared secret in its environment:
+Run the seeding helper from the repository root in the second terminal.
 
 ```sh
 uv run --locked python scripts/seed_demo_delivery.py http://127.0.0.1:8766
 ```
 
-The helper reads the public receipt for the documented controlled burn and submits its log to this instance's `/api/streams` endpoint. Search the Stream index using the public walkthrough wallet. A fresh unsigned endpoint record is labelled **Shared-secret adapter payload**, with provider delivery unverified. This is a local endpoint test, not an independently observed QuickNode delivery. Say so in the recording and keep the provider-delivery gate Pending.
+The helper reads the public receipt for the controlled burn and submits its log to `/api/streams`. Search the Stream index using the public walkthrough wallet. A fresh database shows **Shared-secret adapter payload** in the inspector. The provider-delivery check stays Pending.
 
-If reusing a database, an existing authenticated record remains **Authenticated Stream payload** after a shared-secret retry; that label still does not prove provider origin. Legacy records without stored receipt time or HMAC evidence are labelled **Stream endpoint record**. Do not relabel either as a fresh shared-secret delivery. Use loopback HTTP for local testing or HTTPS for an explicitly chosen remote endpoint; never send the shared secret to a remote HTTP URL or seed the public preview index for this demonstration.
+Existing authenticated records keep the **Authenticated Stream payload** label after a shared-secret retry. Legacy records without stored receipt time or HMAC evidence appear as **Stream endpoint record**. The helper accepts loopback HTTP and remote HTTPS. The public preview has ingestion disabled.
 
 ## Observed state and how to finish the live check
 
