@@ -159,6 +159,8 @@ async def finish(page):
     (live("source_confirming"), True), (live("awaiting_attestation"), True),
     (live("ready"), False), (live("completed"), False), (live("expired"), False),
     (live("caller_required"), False), (live("unavailable"), False),
+    (live("unsupported"), False), (live("source_changed"), False),
+    (live("managed_delivery"), False), (live("submitted"), False),
     (live("awaiting_attestation", example=True), False),
     (live("awaiting_attestation", key="example-2"), False),
 ])
@@ -303,3 +305,118 @@ def test_inspector_shows_countdown_progress_and_stuck_time_in_its_first_frame(mo
     page.width = 390
     app.render()
     assert any(line.startswith("Unfinished for ") for line in texts(app.inspector_host.content))
+
+
+@pytest.mark.parametrize("action", ["stop", "select", "back", "navigate", "disconnect", "disconnect_reconnect"])
+async def test_pending_automatic_response_cannot_restore_a_stopped_or_replaced_inspector(monkeypatch, action):
+    started, release, returned = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    class DelayedService:
+        calls = 0
+
+        async def inspect_transaction(self, *_args, **_kwargs):
+            self.calls += 1
+            started.set()
+            await release.wait()
+            returned.set()
+            return {"transfers": [live("ready")]}
+
+    service = DelayedService()
+    app, page, _ = looping_app(monkeypatch, service)
+    app.install()
+    original = live()
+    other = live("completed", key="other")
+    app.state.transfers = [original, other]
+    app.inspect(original)
+    await asyncio.wait_for(started.wait(), 1)
+    if action == "stop":
+        app.stop_recheck()
+    elif action == "select":
+        app.inspect(other)
+    elif action == "back":
+        app.back()
+    elif action == "navigate":
+        await app.navigate("/demo")
+    else:
+        app.page.on_disconnect(None)
+        if action == "disconnect_reconnect":
+            app.page.on_connect(None)
+    expected_state, expected_selection = app.state, app.state.selected
+    release.set()
+    await asyncio.wait_for(returned.wait(), 1)
+    app.drop_recheck()
+    await finish(page)
+    assert service.calls == 1
+    assert app.state is expected_state and app.state.selected is expected_selection
+    assert original["status"] == "awaiting_attestation"
+    assert app.refresh_error == "" and not app.refreshing
+
+
+async def test_stopping_during_a_failed_pending_read_does_not_restore_an_error(monkeypatch):
+    started, release = asyncio.Event(), asyncio.Event()
+
+    class FailedService:
+        async def inspect_transaction(self, *_args, **_kwargs):
+            started.set()
+            await release.wait()
+            raise ValueError("Old request failed")
+
+    app, page, _ = looping_app(monkeypatch, FailedService())
+    original = live()
+    app.state.transfers = [original]
+    app.inspect(original)
+    await asyncio.wait_for(started.wait(), 1)
+    app.stop_recheck()
+    release.set()
+    await finish(page)
+    assert app.state.selected is original and app.refresh_error == ""
+    assert not app.refreshing
+
+
+async def test_task_cancellation_during_a_pending_read_clears_busy_without_applying_a_result(monkeypatch):
+    started, pending = asyncio.Event(), asyncio.Event()
+
+    class PendingService:
+        async def inspect_transaction(self, *_args, **_kwargs):
+            started.set()
+            await pending.wait()
+            raise AssertionError("Cancelled read must never produce a result")
+
+    app, page, _ = looping_app(monkeypatch, PendingService())
+    rendered_checks = []
+    monkeypatch.setattr(app, "render", lambda: rendered_checks.append(app.rechecking(app._recheck)))
+    original = live()
+    app.state.transfers = [original]
+    app.inspect(original)
+    await asyncio.wait_for(started.wait(), 1)
+    page.tasks[0].cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await page.tasks[0]
+    assert not app.refreshing and not app.rechecking(app._recheck)
+    assert app.state.selected is original and app.refresh_error == ""
+    assert rendered_checks[-1] is False
+
+
+def test_disconnected_countdown_does_not_update_the_client_and_reconnect_restores_controls(monkeypatch):
+    app, _, _ = looping_app(monkeypatch, object())
+    item = live()
+    app.state.selected = item
+    run = app._recheck = ui.Recheck(app.state, item["key"], 0)
+    app._recheck_text = ui.ft.Text("Checking now")
+    updated, rendered = [], []
+    monkeypatch.setattr(app._recheck_text, "update", lambda: updated.append(True))
+    monkeypatch.setattr(app, "render", lambda: rendered.append(True))
+    app.client_disconnected()
+    app.show_recheck_countdown(run)
+    assert updated == []
+    app.client_reconnected()
+    assert rendered == [True]
+    app.show_recheck_countdown(run)
+    assert updated == [True]
+
+
+def test_verified_submitted_receipt_can_supply_its_actual_mint_timestamp():
+    app = ui.InboxUI(DESKTOP_PAGE, object())
+    item = live("completed", minted_at=MINTED_AT, submitted_receipt_verified=True,
+                submitted_receipt_url="https://explorer.testnet.arc.io/tx/0x" + "bb" * 32)
+    assert "Minted 06:45:12 UTC, 99 s after the burn" in texts(app.proof(item, NOW))

@@ -355,6 +355,7 @@ class InboxUI:
         self._recheck: Recheck | None = None
         self._recheck_text: ft.Text | None = None
         self.client_connected = True
+        self._connection_generation = 0
         self.recheck_sleep = asyncio.sleep
         self.recheck_clock = time.monotonic
         self.root = ft.Row(expand=True, spacing=0, vertical_alignment=ft.CrossAxisAlignment.STRETCH)
@@ -404,11 +405,20 @@ class InboxUI:
         self.page.on_resize = self.resize
         self.page.on_route_change = self.route_changed
         # A disconnected tab skips its rechecks until Flet reconnects the session.
-        self.page.on_connect = lambda _: setattr(self, "client_connected", True)
-        self.page.on_disconnect = lambda _: setattr(self, "client_connected", False)
+        self.page.on_connect = self.client_reconnected
+        self.page.on_disconnect = self.client_disconnected
         self.page.add(self.root)
         self._installed = True
         self.render()
+
+    def client_reconnected(self, _=None) -> None:
+        self.client_connected = True
+        if self._installed:
+            self.render()
+
+    def client_disconnected(self, _=None) -> None:
+        self.client_connected = False
+        self._connection_generation += 1
 
     async def load_motion_preference(self) -> None:
         try:
@@ -736,7 +746,8 @@ class InboxUI:
             attestation.append(line(f"Expires at Arc block {item['expiration_block']:,}"))
         mint = []
         destination_url = item.get("destination_url") if live else None
-        minted = mint_time(item, now) if destination_url else None
+        submitted_url = self.submitted_receipt_url(item)
+        minted = mint_time(item, now) if destination_url or submitted_url else None
         if minted:
             mint.append(line(minted))
         if item.get("destination_block") is not None:
@@ -745,7 +756,6 @@ class InboxUI:
             mint.append(line(f"Nonce {nonce_status}, read at Arc block {item['destination_block']:,}"))
         if destination_url:
             mint.append(self.proof_link("Open verified Arc receipt", destination_url))
-        submitted_url = self.submitted_receipt_url(item)
         if submitted_url:
             mint.append(line("Submitted receipt matches the original message"))
             mint.append(self.proof_link("Open submitted Arc receipt", submitted_url))
@@ -1226,6 +1236,8 @@ class InboxUI:
         self.page.run_task(self.recheck_loop, self._recheck)
 
     def drop_recheck(self, _=None) -> None:
+        if self._recheck is not None:
+            self._recheck.active = False
         self._recheck = None
 
     def stop_recheck(self, _=None) -> None:
@@ -1235,14 +1247,14 @@ class InboxUI:
 
     def show_recheck_countdown(self, run: Recheck) -> None:
         line = self._recheck_text
-        if line is None or not self.rechecking(run):
+        if line is None or not self.rechecking(run) or not self.client_connected:
             return
         line.value = self.recheck_label(run)
         try:
             line.update()
         except RuntimeError as exc:
             # The countdown is cosmetic. Before the line reaches the client, the next render shows it.
-            if "must be added to the page" not in str(exc):
+            if str(exc) != "Session closed" and "must be added to the page" not in str(exc):
                 raise
 
     async def recheck_loop(self, run: Recheck) -> None:
@@ -1258,20 +1270,36 @@ class InboxUI:
                 if self.recheck_clock() - run.started >= RECHECK_LIMIT_SECONDS:
                     run.active = False
                     run.note = "Stopped checking after 10 min. Refresh this transfer to check again."
-                    self.render()
+                    if self.client_connected:
+                        self.render()
                     return
                 if (not self.client_connected or self.state.busy or self.refreshing or self.preparing
                         or self._receipt_request is not None):
                     continue
                 run.remaining = RECHECK_SECONDS
-                await self.refresh_transfer()
+                await self.refresh_transfer(recheck=run)
+        except asyncio.CancelledError:
+            if run is self._recheck:
+                self.drop_recheck()
+                if self.client_connected:
+                    self.render()
+            raise
         finally:
             run.active = False
 
-    async def refresh_transfer(self, _=None) -> None:
+    async def refresh_transfer(self, _=None, *, recheck: Recheck | None = None) -> None:
         state, item = self.state, self.state.selected
+        connection_generation = self._connection_generation
         if state.busy or state.example or item is None or self.refreshing or self.preparing or self._receipt_request is not None:
             return
+        if recheck is not None and (not self.rechecking(recheck) or not self.client_connected):
+            return
+
+        def accepts_result():
+            return (self.state is state and state.selected is item
+                    and (recheck is None or (self.rechecking(recheck) and self.client_connected
+                                            and self._connection_generation == connection_generation)))
+
         self.refreshing = True
         self.refresh_error = ""
         state.prepared = None
@@ -1282,7 +1310,7 @@ class InboxUI:
             transfers = result["transfers"]
             if len(transfers) != 1 or transfers[0]["key"] != item["key"]:
                 raise ValueError("The original supported burn was not found in its current source receipt.")
-            if self.state is state and state.selected is item:
+            if accepts_result():
                 fresh = transfers[0] | {"discovery_source": item.get("discovery_source", "receipt")}
                 state.transfers = [fresh if row["key"] == item["key"] else row for row in state.transfers]
                 state.selected = fresh
@@ -1291,11 +1319,12 @@ class InboxUI:
                     state.filter = "all"
                     state.query = ""
         except Exception as exc:
-            if self.state is state and state.selected is item:
+            if accepts_result():
                 self.refresh_error = f"Refresh failed. Showing the previous result. {safe_error(exc)}"
         finally:
             self.refreshing = False
-            self.render()
+            if self.client_connected:
+                self.render()
 
     async def replay_mint(self, _=None) -> None:
         item = self.state.selected
