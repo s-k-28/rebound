@@ -35,6 +35,7 @@ STATE_COPY = {
     "caller_required": ("Caller required", "Only the destination caller named in the original transfer can deliver this message. The recipient cannot change that rule.", AMBER, ft.Icons.LOCK_OUTLINE_ROUNDED),
     "expired": ("Attestation expired", "The original burn still exists. It needs a fresh Circle attestation before it can be completed.", AMBER, ft.Icons.UPDATE_ROUNDED),
     "unsupported": ("Outside current support", "Rebound cannot safely prepare this transfer with the current route and message support.", MUTED, ft.Icons.INFO_OUTLINE_ROUNDED),
+    "managed_delivery": ("Forwarded transfer", "Check delivery in the original app and refresh the Arc status here.", AMBER, ft.Icons.ALT_ROUTE_ROUNDED),
     "unavailable": ("Could not verify", "A network or data source is unavailable. Try again before taking any action.", MUTED, ft.Icons.CLOUD_OFF_OUTLINED),
     "source_changed": ("Source needs review", "The source receipt no longer matches the indexed event. Rebound will not prepare a recovery.", AMBER, ft.Icons.WARNING_AMBER_ROUNDED),
     "submitted": ("Mint submitted", "A destination transaction was submitted. Check its receipt before attempting another mint.", BLUE, ft.Icons.SCHEDULE_ROUNDED),
@@ -559,9 +560,17 @@ class InboxUI:
         path = ft.Column([ft.Row([ft.Icon(ft.Icons.CHECK_CIRCLE_ROUNDED if done else ft.Icons.RADIO_BUTTON_UNCHECKED_ROUNDED,
             size=17, color=BLUE if done else "#B4C1B6"), self.text(label, 12, INK if done else MUTED)], spacing=10)
             for label, done in steps], spacing=16)
-        values = [self.value_line("Fixed recipient", item["recipient"], selectable=True),
-                  self.value_line("Recipient receives", display_amount(item.get("net_amount")) + " USDC" if item.get("net_amount") else "Waiting for attestation"),
-                  self.value_line("Protocol fee", display_amount(item["fee"]) + " USDC" if item.get("fee") is not None else "Not available yet")]
+        managed = bool(item.get("delivery_mode"))
+        downstream = item.get("delivery_mode") == "forwarding_with_app_hook"
+        values = [self.value_line("CCTP mint recipient" if downstream else "Fixed recipient", item["recipient"], selectable=True),
+                  self.value_line("CCTP mint amount" if downstream else "Recipient receives",
+                                  display_amount(item.get("net_amount")) + " USDC" if item.get("net_amount") else "Waiting for attestation"),
+                  self.value_line("Attested fee" if managed else "Protocol fee",
+                                  display_amount(item["fee"]) + " USDC" if item.get("fee") is not None else "Not available yet")]
+        if managed:
+            values.append(self.value_line("Delivery", "Circle forwarding with app hook" if downstream else "Circle forwarding"))
+        if item.get("forward_state"):
+            values.append(self.value_line("Circle delivery report", item["forward_state"].title()))
         if item.get("discovery_source"):
             discovery = {"stream": "Stream delivery", "rpc": "Source RPC history",
                          "receipt": "Base Sepolia receipt"}[item["discovery_source"]]
@@ -576,7 +585,8 @@ class InboxUI:
         controls = [header, ft.Container(ft.Column([
             self.text(item.get("explanation") or description, 12, MUTED), path,
             ft.Divider(color=LINE), *values,
-            self.text("The original recipient cannot be changed.", 10, MUTED),
+            self.text("Arc verifies the CCTP mint. Check downstream actions in the original app." if downstream
+                      else "The original recipient cannot be changed.", 10, MUTED),
         ], spacing=19), padding=22), self.next_step(item, description)]
         destination_url = item.get("destination_url") if not self.state.example and not item.get("example") else None
         if destination_url:
@@ -618,12 +628,14 @@ class InboxUI:
             f"Source transaction: {item['tx_hash']}",
             f"Source block: {item['block_number']} · log {item['log_index']}",
             f"Source receipt: {item['source_url']}",
-            f"Fixed recipient: {item['recipient']}",
+            f"CCTP mint recipient: {item['recipient']}",
             f"Burn amount: {item['amount']} USDC",
         ]
         if item.get("nonce"):
-            fields.extend([f"CCTP nonce: {item['nonce']}", f"Protocol fee: {item['fee']} USDC",
-                           f"Destination amount: {item['net_amount']} USDC"])
+            fields.extend([f"CCTP nonce: {item['nonce']}", f"Attested fee: {item['fee']} USDC",
+                           f"CCTP mint amount: {item['net_amount']} USDC"])
+        if item.get("delivery_mode") == "forwarding_with_app_hook":
+            fields.append("Check downstream app actions separately from the CCTP mint.")
         if item.get("destination_block") is not None:
             nonce_status = "consumed" if item["nonce_used"] else "unused"
             fields.append(f"Arc nonce {nonce_status} at block {item['destination_block']}")

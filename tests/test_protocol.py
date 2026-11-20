@@ -17,7 +17,7 @@ def word_address(value):
     return bytes.fromhex(value[2:]).rjust(32, b"\0")
 
 
-def message_hex(*, caller="0x" + "00" * 20, recipient=WALLET, expiration=1000, fee=500):
+def message_hex(*, caller="0x" + "00" * 20, recipient=WALLET, expiration=1000, fee=500, hook=b""):
     # Independent fixture encoded from Circle's published packed layout.
     head = (1).to_bytes(4, "big") + (6).to_bytes(4, "big") + (26).to_bytes(4, "big")
     head += bytes.fromhex("ab" * 32) + word_address(MESSENGER) * 2
@@ -26,17 +26,17 @@ def message_hex(*, caller="0x" + "00" * 20, recipient=WALLET, expiration=1000, f
     body += (128_500_000).to_bytes(32, "big") + word_address(WALLET)
     body += (1000).to_bytes(32, "big") + fee.to_bytes(32, "big")
     body += expiration.to_bytes(32, "big")
-    return "0x" + (head + body).hex()
+    return "0x" + (head + body + hook).hex()
 
 
-def burn_log(*, caller="0x" + "00" * 20, recipient=WALLET, amount=128_500_000):
+def burn_log(*, caller="0x" + "00" * 20, recipient=WALLET, amount=128_500_000, hook=b""):
     signature = "DepositForBurn(address,uint256,address,bytes32,uint32,bytes32,bytes32,uint256,uint32,bytes)"
     return {
         "address": MESSENGER,
         "topics": ["0x" + keccak(text=signature).hex(), "0x" + word_address(TOKEN).hex(),
                    "0x" + word_address(WALLET).hex(), "0x" + (2000).to_bytes(32, "big").hex()],
         "data": "0x" + encode(["uint256", "bytes32", "uint32", "bytes32", "bytes32", "uint256", "bytes"],
-            [amount, word_address(recipient), 26, word_address(MESSENGER), word_address(caller), 1000, b""]).hex(),
+            [amount, word_address(recipient), 26, word_address(MESSENGER), word_address(caller), 1000, hook]).hex(),
         "transactionHash": "0x" + "cd" * 32,
         "blockHash": "0x" + "ef" * 32,
         "blockNumber": "0x64", "logIndex": "0x3", "removed": False,

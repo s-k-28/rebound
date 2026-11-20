@@ -14,6 +14,17 @@ November 19, 2026. This records observed checks, not a claim of hackathon readin
 
 No private key was read and no financial transaction, burn, mint or wallet connection was performed in these checks. A real controlled recovery and destination receipt remain required before claiming end-to-end recovery.
 
+### Circle forwarding coverage
+
+A read-only survey of 20 Base Sepolia → Arc Testnet burns indexed by Blockscout found four that the earlier release labeled unsupported. Each source receipt contained a Circle forwarding hook. After adding read-only verification for those formats, Rebound confirmed all four Arc mints and linked their receipts. [Blockscout source logs](https://base-sepolia.blockscout.com/address/0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA?tab=logs) · [Circle forwarding documentation](https://developers.circle.com/cctp/concepts/forwarding-service#hook-format)
+
+| Case | Source burn | Arc receipt |
+|---|---|---|
+| Version 0 forwarding | [Base log 15](https://sepolia.basescan.org/tx/0xe82ed62d3b8b544593cb6790341aa521507be7a80fde404c651dc093002ff599) | [Verified mint](https://explorer.testnet.arc.io/tx/0x0b15736bcdb4bbcf8cd7c001bbda82276ab7e9efca86640a23257ca360a9ea27) |
+| Version 1 forwarding with app hook | [Base log 53](https://sepolia.basescan.org/tx/0xf13feaa5ad237b6fce96d0818c7f6a220f52f76cb278596d84a134d7e2972cc0) | [Verified mint](https://explorer.testnet.arc.io/tx/0xf7bdc0cc199fd3fa75eebdddd075f0b2db38571ba31cd490db86447cefb06e62) |
+
+The destination receipt verifies the CCTP mint to the encoded recipient. For a transfer containing an app hook, review downstream actions in the original app.
+
 ## Correctness review
 
 Tests cover original-recipient and amount binding, message versions, caller restrictions, nonce completion, expiry, malformed responses, canonical source identity, RPC range limits, provider outages, simulation failure, unsigned API preparation, fixture isolation, local key/caller matching, fee caps, confirmation and at-most-one broadcast attempt.

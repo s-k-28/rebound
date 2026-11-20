@@ -74,6 +74,7 @@ The unsigned review shows the caller’s Arc balance and gas budget separately f
 | Ready | Current checks allow preparation; select the actual caller and revalidate |
 | Caller required | The message restricts who can call the destination contract; the recipient is not automatically authorized |
 | Expired | The existing burn needs a refreshed attestation. [Circle's re-attestation procedure](https://developers.circle.com/cctp/references/technical-guide#message-body) |
+| Forwarded transfer | The burn requested Circle forwarding. Check the original app while Arc’s nonce is unused. |
 | Completed | Destination nonce is already consumed; another mint is unnecessary |
 | Source changed | Source evidence no longer matches the canonical receipt/block; inspect rather than sending |
 | Unsupported | The route, message, hook or adapter is outside this version's coverage |
@@ -129,7 +130,7 @@ Protocol tests exercise message fields, recipient/caller/amount matching, malfor
 ## Coverage and remaining work
 
 - Scans default to 2,000 source blocks and cap at 50,000; provider limits and retained index coverage affect discovery.
-- Only canonical native USDC `DepositForBurn` events from the supported TokenMessengerV2 to Arc are included. Unknown router ownership and hooks are unsupported.
+- Discovery covers canonical native USDC `DepositForBurn` events from the supported TokenMessengerV2 to Arc. Rebound checks Circle-forwarded mints in read-only mode. For forwarding with an app hook, the verified receipt establishes the CCTP mint and the original app handles downstream actions. Manual recovery is available for eligible hook-free burns. [Circle forwarding formats](https://developers.circle.com/cctp/concepts/forwarding-service#hook-format)
 - Source and destination RPCs, Circle indexing and gas availability remain external dependencies.
 - No seed recovery, arbitrary crypto recovery, loss insurance, mainnet support or recipient redirection.
 - Seamless browser wallet signing, real QuickNode deployment, public hosting, live testnet recovery evidence and the submission video remain release gates. A filter file or synthetic webhook alone does not qualify for the QuickNode bounty.

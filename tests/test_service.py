@@ -181,6 +181,29 @@ async def test_unrelated_wallet_is_not_attributed_a_transfer(setup_service):
     assert (await app.scan(OTHER, blocks=150))["transfers"] == []
 
 
+@pytest.mark.parametrize("used,expected_state", [(False, "managed_delivery"), (True, "completed")])
+async def test_forwarded_app_hook_is_inspected_without_preparing_recovery(setup_service, used, expected_state):
+    app, state = setup_service
+    forward = b"cctp-forward".ljust(24, b"\0") + encode(["uint32"], [1])[-4:] + b"\0" * 4
+    extra = b"circle-generic-executor".ljust(24, b"\0") + bytes.fromhex("0000000100000004") + b"data"
+    hook = forward + extra
+    state["logs"] = [burn_log(hook=hook)]
+    state["messages"] = [{"status": "complete", "message": message_hex(hook=hook),
+                          "attestation": "0x" + "11" * 65, "forwardState": "COMPLETE"}]
+    state["used"] = used
+
+    row, = (await app.scan(WALLET, blocks=150))["transfers"]
+    assert row["status"] == expected_state
+    assert row["delivery_mode"] == "forwarding_with_app_hook"
+    assert row["forward_state"] == "COMPLETE"
+    assert row["nonce_used"] is used
+    with pytest.raises(ValueError, match="delivery hook"):
+        await app.prepare(row["tx_hash"], row["log_index"], WALLET)
+
+    state["messages"][0]["message"] = message_hex(hook=hook + b"invalid")
+    assert (await app.scan(WALLET, blocks=150))["transfers"][0]["status"] == "unsupported"
+
+
 async def test_cached_candidates_survive_empty_new_window_but_are_revalidated(setup_service):
     app, state = setup_service
     await app.scan(WALLET, blocks=150)

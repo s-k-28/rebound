@@ -59,6 +59,15 @@ class DestinationState:
     nonce_used: bool
 
 
+@dataclass(frozen=True)
+class Attestation:
+    message: p.Message
+    raw: str
+    signature: str
+    receipt_hint: str | None
+    forward_state: str | None
+
+
 EXPLANATIONS = {
     "ready": "The original transfer has a matching attestation and its destination nonce is unused. Review it before preparing recovery.",
     "completed": "Arc has already consumed this message's nonce. Do not send or mint again.",
@@ -69,6 +78,7 @@ EXPLANATIONS = {
     "unsupported": "The available message cannot be matched safely to this supported transfer. No recovery transaction is prepared.",
     "source_changed": "The indexed burn no longer matches the canonical source chain. Refresh and investigate the original receipt.",
     "unavailable": "A required provider could not verify the transfer. Refresh later; this does not establish that funds are lost.",
+    "managed_delivery": "This burn requested Circle forwarding. Arc has not consumed the nonce. Check the forwarding status in the original app.",
 }
 
 
@@ -299,12 +309,12 @@ class RecoveryService:
             raise AmbiguousBurn("Source transaction contains ambiguous identical burns; exact message association is not supported yet.")
         return burn
 
-    async def _matched_attestation(self, burn: p.Burn) -> tuple[p.Message, str, str, str | None] | None:
+    async def _matched_attestation(self, burn: p.Burn, *, inspect_forwarding: bool = False) -> Attestation | None:
         response = await self.circle.messages(burn.tx_hash)
         rows = response["messages"]
         if not rows:
             return None
-        if response.get("sourceTxHash", "").lower() != burn.tx_hash:
+        if p.hash32(response.get("sourceTxHash")) != burn.tx_hash:
             raise ValueError("Circle response does not identify the original source transaction.")
         matched = {}
         pending = False
@@ -317,10 +327,15 @@ class RecoveryService:
             try:
                 raw, attestation = row["message"], row["attestation"]
                 message = p.decode_message(raw)
-                p.validate_match(burn, message)
+                p.validate_match(burn, message, inspect_forwarding=inspect_forwarding)
                 p.receive_calldata(raw, attestation)  # Structural signature-size validation.
                 receipt_hint = row.get("destinationMintTxHash") or row.get("forwardTxHash")
-                matched[(raw.lower(), attestation.lower())] = (message, raw, attestation, receipt_hint)
+                forward_state = row.get("forwardState")
+                if forward_state not in ("PENDING", "COMPLETE", "FAILED"):
+                    forward_state = None
+                matched[(raw.lower(), attestation.lower())] = Attestation(
+                    message, raw, attestation, receipt_hint, forward_state,
+                )
             except (ValueError, KeyError, TypeError):
                 continue
         if len(matched) == 1:
@@ -364,6 +379,7 @@ class RecoveryService:
             "destination_url": None,
             "source_verified": False, "attestation_matched": False,
             "destination_block": None, "nonce_used": None, "expiration_block": None,
+            "delivery_mode": None, "forward_state": None,
         }
         try:
             if receipt_burns is None:
@@ -373,13 +389,17 @@ class RecoveryService:
             row["source_verified"] = True
             if burn.destination_domain != 26:
                 raise ValueError("Unsupported destination route.")
-            attested = await self._matched_attestation(burn)
+            delivery_mode = p.forwarding_hook_kind(burn.hook)
+            row["delivery_mode"] = delivery_mode
+            attested = await self._matched_attestation(burn, inspect_forwarding=bool(delivery_mode))
             if attested is None:
                 status = "awaiting_attestation"
             else:
-                message, raw, _, receipt_hint = attested
+                message, raw, receipt_hint = attested.message, attested.raw, attested.receipt_hint
                 row.update(nonce=message.nonce, fee=p.usdc(message.fee), net_amount=p.usdc(message.amount - message.fee),
                            attestation_matched=True, expiration_block=message.expires_at)
+                if delivery_mode:
+                    row["forward_state"] = attested.forward_state
                 destination = await self._message_state(message, caller)
                 row.update(destination_block=destination.block, nonce_used=destination.nonce_used)
                 status = destination.status
@@ -389,7 +409,9 @@ class RecoveryService:
                         local_hint = self.store.local_mint(burn, message.nonce)
                         if local_hint and local_hint != receipt_hint:
                             row["destination_url"] = await self._destination_receipt_url(local_hint, raw, message)
-                if status == "ready":
+                elif delivery_mode:
+                    status = "managed_delivery"
+                elif status == "ready":
                     if source_head is None:
                         source_head = quantity(await self.base.call("eth_blockNumber"))
                     if source_head - burn.block_number + 1 < 12:
@@ -410,13 +432,15 @@ class RecoveryService:
             raise ValueError("Event log index must be a non-negative integer.")
         await self._verify_chain(self.base, 84532, p.MESSENGER)
         burn = await self._receipt_burn(tx_hash, log_index)
+        if burn.hook:
+            raise ValueError("This burn contains a delivery hook. Check its status with the original app.")
         head = quantity(await self.base.call("eth_blockNumber"))
         if head - burn.block_number + 1 < 12:
             raise ValueError("Transfer is source_confirming. Wait for more source confirmations.")
         attested = await self._matched_attestation(burn)
         if attested is None:
             raise ValueError("Transfer is awaiting_attestation. Refresh later.")
-        message, raw, attestation, _ = attested
+        message, raw, attestation = attested.message, attested.raw, attested.signature
         status = (await self._message_state(message, caller)).status
         if status != "ready":
             raise ValueError(f"Transfer is {status}. {EXPLANATIONS[status]}")
