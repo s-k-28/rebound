@@ -100,6 +100,27 @@ def validate_demo(body: bytes, content_type: str) -> str:
     return "Flet demo entry point is accessible (rendering not checked)"
 
 
+def validate_completed_case(body: bytes, content_type: str) -> str:
+    report = json_object(body, content_type)
+    rows = report.get("transfers")
+    if report.get("tx_hash") != SOURCE_TX or not isinstance(rows, list) or len(rows) != 1:
+        raise CheckFailed("expected the single controlled Base transfer")
+    row = rows[0]
+    expected = {
+        "key": f"{SOURCE_TX}:{SOURCE_LOG}",
+        "status": "completed",
+        "net_amount": "0.99987",
+        "submitted_receipt_url": f"https://explorer.testnet.arc.io/tx/{ARC_TX}",
+        "burned_at": "2026-11-20T06:43:33+00:00",
+        "minted_at": "2026-11-20T06:45:12+00:00",
+    }
+    proof = ("source_verified", "attestation_matched", "nonce_used", "submitted_receipt_verified")
+    if (not isinstance(row, dict) or any(row.get(key) != value for key, value in expected.items())
+            or any(row.get(key) is not True for key in proof)):
+        raise CheckFailed("the controlled case is missing its completed state, verified Arc receipt or chain times")
+    return "verified Base burn and Arc mint, 99 seconds apart"
+
+
 def validate_replay(body: bytes, content_type: str) -> str:
     replay = json_object(body, content_type)
     expected = {
@@ -136,6 +157,11 @@ async def check_preview(
         ("liveness", "/api/health", validate_health),
         ("readiness", "/api/ready", validate_readiness),
         ("demo", "/demo", validate_demo),
+        (
+            "controlled transfer",
+            f"/api/transactions/{SOURCE_TX}?log_index={SOURCE_LOG}&destination_hash={ARC_TX}",
+            validate_completed_case,
+        ),
         (
             "historical replay",
             f"/api/transactions/{SOURCE_TX}/replay?log_index={SOURCE_LOG}",

@@ -162,7 +162,7 @@ uv run ruff check .
 
 Use `uv run python scripts/watch_prs.py --interval 900 --hours 6` to record pull requests and changed heads every 15 minutes. The watcher uses the authenticated GitHub CLI. Review and merge decisions use the exact tested head.
 
-Use `uv run python scripts/check_preview.py "$PREVIEW_URL"` to check an HTTPS deployment’s liveness, provider readiness, demo entry and replay of the controlled run.
+Use `uv run python scripts/check_preview.py "$PREVIEW_URL"` to check an HTTPS deployment’s liveness, provider readiness, demo entry, verified transfer timeline and historical replay.
 
 Protocol tests exercise message fields, recipient/caller/amount matching, malformed input, nonce completion and expiry. Service tests use HTTP-level fixtures around the real discovery/reconciliation code. CLI tests use a fixed throwaway key and isolated RPC doubles: they verify caller and chain guards, fee caps, confirmation, fresh revalidation, signed sender, exactly one broadcast attempt and receipt evidence. These automated tests do not prove that a real testnet recovery has been executed.
 
