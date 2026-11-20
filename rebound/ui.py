@@ -183,7 +183,7 @@ class InboxState:
                 "completed": sum(item["status"] == "completed" for item in self.transfers)}
 
     async def scan(self, service: Any, search: str, blocks: int, end_block: str = "", *,
-                   mode: str = "wallet", log_index: int | None = None) -> None:
+                   end_time: str | None = None, mode: str = "wallet", log_index: int | None = None) -> None:
         self.busy = True
         self.example = False
         self.scanned = False
@@ -213,6 +213,10 @@ class InboxState:
                     if anchor and (not anchor.isascii() or not anchor.isdecimal() or len(anchor) > 16):
                         raise ValueError("Enter a Base Sepolia end block using digits only.")
                     options = {"end_block": int(anchor)} if anchor else {}
+                    if end_time and end_time.strip():
+                        if anchor:
+                            raise ValueError("Choose an ending block or an ending UTC time, not both.")
+                        options["end_time"] = end_time.strip()
                     result = await service.scan(wallet, blocks=blocks, **options)
             self.transfers = result["transfers"]
             self.coverage = result.get("coverage") or f"Base Sepolia blocks {result['from_block']:,}–{result['to_block']:,}."
@@ -260,9 +264,17 @@ class InboxUI:
             filled=True, fill_color=SURFACE, border_color=RULE_STRONG, focused_border_color=ACCENT,
             border_radius=6, content_padding=ft.Padding.symmetric(horizontal=12, vertical=6),
         )
-        self.end_block = ft.TextField(hint_text="End block, blank for latest", width=230, height=40,
+        self.history_ending = ft.Dropdown(value="latest", width=188, text_size=13, dense=True,
+            options=[ft.DropdownOption("latest", "Latest blocks"), ft.DropdownOption("block", "End block"),
+                     ft.DropdownOption("time", "End time (UTC)")], on_select=self.change_history_ending,
+            filled=True, fill_color=SURFACE, border_color=RULE_STRONG, focused_border_color=ACCENT,
+            border_radius=6, content_padding=ft.Padding.symmetric(horizontal=12, vertical=6))
+        self.end_block = ft.TextField(hint_text="Base Sepolia end block", width=230, height=40,
                                       keyboard_type=ft.KeyboardType.NUMBER, on_submit=self.scan,
                                       **field_style(content_padding=ft.Padding.symmetric(horizontal=12, vertical=10)))
+        self.end_time = ft.TextField(hint_text="YYYY-MM-DD HH:MM (UTC)", width=280, height=40,
+                                     on_submit=self.scan,
+                                     **field_style(content_padding=ft.Padding.symmetric(horizontal=12, vertical=10)))
         self.show_history = False
         self.caller_input = ft.TextField(hint_text="Signing address, 0x…", height=42,
                                          on_change=self.caller_changed, **field_style())
@@ -396,6 +408,8 @@ class InboxUI:
         self.tx_input.disabled = self.state.busy
         self.history.disabled = self.state.busy
         self.end_block.disabled = self.state.busy
+        self.end_time.disabled = self.state.busy
+        self.history_ending.disabled = self.state.busy
         self.caller_input.disabled = self.preparing
         self.search_input.value = self.state.query
         self.inspector_host.animate_opacity = None
@@ -487,9 +501,7 @@ class InboxUI:
                                 self.link("Explore examples", self.examples, disabled=busy)])
         controls = [form, ft.Row(options, wrap=True, spacing=4, run_spacing=0)]
         if self.show_history and not self.show_transaction:
-            controls.append(ft.Row([self.end_block,
-                self.text("Scan back from this Base Sepolia block to revisit an older window.", 12, INK_3)],
-                wrap=True, spacing=12))
+            controls.append(self.history_window())
         if busy:
             controls.extend([ft.ProgressBar(color=ACCENT, bgcolor=RULE, bar_height=2),
                              self.text("Reading source events, Circle attestations and destination state…", 12, INK_2)])
@@ -501,12 +513,35 @@ class InboxUI:
 
     def history_options(self):
         history_label = "Hide history options" if self.show_history else "History options"
-        if not self.show_history and self.end_block.value.strip():
-            history_label = f"History options (end block {self.end_block.value.strip()[:16]})"
+        if not self.show_history:
+            if self.history_ending.value == "block" and self.end_block.value.strip():
+                history_label = f"History options (end block {self.end_block.value.strip()[:16]})"
+            elif self.history_ending.value == "time" and self.end_time.value.strip():
+                history_label = "History options (end time UTC)"
         options = [self.link(history_label, self.toggle_history, disabled=self.state.busy)]
         if not self.state.example and getattr(getattr(self.service, "settings", None), "stream_enabled", False):
             options.append(self.link("Search Stream index", self.scan_index, disabled=self.state.busy))
         return options
+
+    def history_window(self):
+        ending = self.history_ending.value
+        anchor = self.end_block if ending == "block" else self.end_time if ending == "time" else None
+        self.history_ending.width = None if self.narrow else 188
+        controls = [self.history_ending]
+        if anchor is not None:
+            anchor.width = None if self.narrow else 280 if ending == "time" else 230
+            controls.append(anchor)
+        fields = (ft.Column(controls, spacing=8, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
+                  if self.narrow else ft.Row(controls, spacing=8))
+        note = ("Scan backwards from the latest Base Sepolia block by the selected block window." if ending == "latest"
+                else "Choose a time after the transfer. Rebound scans backward over the selected number of blocks. "
+                "Times without seconds use :00 UTC; blank uses latest."
+                if ending == "time" else "Choose an ending Base Sepolia block. Rebound scans backward over the selected number of blocks. Blank uses latest.")
+        return ft.Column([fields, self.text(note, 12, INK_3)], spacing=6)
+
+    def change_history_ending(self, _=None):
+        if not self.state.busy:
+            self.render()
 
     def inbox(self):
         counts = self.state.counts()
@@ -965,8 +1000,10 @@ class InboxUI:
         self.state.busy = True
         self.render()
         search = self.tx_input.value if mode == "transaction" else self.wallet_input.value or self.state.wallet
+        end_block = (self.end_block.value or "") if self.history_ending.value == "block" else ""
+        options = {"end_time": self.end_time.value} if self.history_ending.value == "time" and (self.end_time.value or "").strip() else {}
         await self.state.scan(self.service, search or "", int(self.history.value or "2000"),
-                              self.end_block.value or "", mode=mode, log_index=log_index)
+                              end_block, mode=mode, log_index=log_index, **options)
         self.render()
 
     async def scan_index(self, _=None) -> None:
@@ -979,6 +1016,7 @@ class InboxUI:
         self.show_history = True
         self.wallet_input.value = LIVE_SAMPLE_WALLET
         self.end_block.value = str(LIVE_SAMPLE_END_BLOCK)
+        self.history_ending.value = "block"
         self.history.value = str(LIVE_SAMPLE_BLOCKS)
         await self.scan()
 
