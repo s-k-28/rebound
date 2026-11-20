@@ -93,6 +93,21 @@ async def test_shared_case_rechecks_one_public_source_event(monkeypatch):
     assert app.case_link(item | {"example": True}) is None
 
 
+async def test_synthetic_wallet_has_a_separate_stream_flow_without_live_requests():
+    from rebound.examples import EXAMPLE_WALLET
+
+    state = ui.InboxState()
+    await state.scan(object(), EXAMPLE_WALLET, 2000)
+    assert state.example and len(state.transfers) == 4
+    await state.scan(object(), EXAMPLE_WALLET, 2000, mode="stream")
+    item, = state.transfers
+    assert item["recipient"] == EXAMPLE_WALLET
+    assert item["discovery_source"] == "example_stream"
+    assert item["example"] and item["destination_url"] is None
+    with pytest.raises(ValueError, match="only available for verified live transfers"):
+        await state.prepare(object(), item, EXAMPLE_WALLET)
+
+
 def test_attention_filter_excludes_completed_but_preserves_waiting():
     state = ui.InboxState()
     state.load_examples()

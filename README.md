@@ -50,6 +50,10 @@ Use **History options** in the browser or `--end-block` in the CLI to revisit a 
 
 **Copy live case link** opens the exact source transaction and event index on the same Rebound deployment. The recipient of the link gets a fresh chain check.
 
+Open `/demo` or search for `0x05af7613449b84f2a02893d35e6cdee479404ce8` to use the synthetic wallet. **Show simulated Stream delivery** opens an example of the Stream discovery workflow. This demo uses local fixture data and cannot prepare a transaction.
+
+For a real Base Sepolia backfill, use the public sample wallet and source block in [live validation](docs/VALIDATION.md#reproduce-the-read-only-check).
+
 For a completed direct mint, **Replay historical mint** verifies the original receipt, reads the nonce at the previous block and the receipt block, then simulates the same attestation against the previous block. The replay requires an Arc RPC that serves historical state and uses reads only.
 
 ### Complete a transfer locally

@@ -8,7 +8,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import flet as ft
 
-from rebound.examples import example_transfers
+from rebound.examples import EXAMPLE_WALLET, example_stream_transfer, example_transfers
 from rebound.protocol import ZERO, address, hash32
 
 INK = "#172823"
@@ -81,15 +81,17 @@ class InboxState:
     query: str = ""
     mode: str = "wallet"
 
-    def load_examples(self) -> None:
-        self.transfers = example_transfers()
+    def load_examples(self, *, stream: bool = False) -> None:
+        self.transfers = [example_stream_transfer()] if stream else example_transfers()
         self.example = True
-        self.mode = "wallet"
+        self.mode = "stream" if stream else "wallet"
         self.scanned = True
+        self.partial = False
         self.filter = "all"
         self.query = ""
         self.error = ""
-        self.coverage = "Four synthetic transfers show how recovery states work. No live funds are represented."
+        self.coverage = ("Simulated Stream delivery. This case uses synthetic data."
+                         if stream else "Four synthetic transfers show how recovery states work. No live funds are represented.")
         self.selected = None
         self.prepared = None
 
@@ -129,16 +131,20 @@ class InboxState:
             if mode == "transaction":
                 options = {"log_index": log_index} if log_index is not None else {}
                 result = await service.inspect_transaction(hash32(search.strip()), **options)
-            elif mode == "stream":
-                self.wallet = address(search.strip())
-                result = await service.scan_stream(self.wallet)
             else:
-                self.wallet = address(search.strip())
-                anchor = end_block.strip()
-                if anchor and (not anchor.isascii() or not anchor.isdecimal() or len(anchor) > 16):
-                    raise ValueError("Enter a Base Sepolia end block using digits only.")
-                options = {"end_block": int(anchor)} if anchor else {}
-                result = await service.scan(self.wallet, blocks=blocks, **options)
+                wallet = address(search.strip())
+                if wallet == EXAMPLE_WALLET:
+                    self.load_examples(stream=(mode == "stream"))
+                    return
+                self.wallet = wallet
+                if mode == "stream":
+                    result = await service.scan_stream(wallet)
+                else:
+                    anchor = end_block.strip()
+                    if anchor and (not anchor.isascii() or not anchor.isdecimal() or len(anchor) > 16):
+                        raise ValueError("Enter a Base Sepolia end block using digits only.")
+                    options = {"end_block": int(anchor)} if anchor else {}
+                    result = await service.scan(wallet, blocks=blocks, **options)
             self.transfers = result["transfers"]
             self.coverage = result.get("coverage") or f"Base Sepolia blocks {result['from_block']:,}–{result['to_block']:,}."
             self.partial = bool(result.get("partial"))
@@ -278,7 +284,7 @@ class InboxUI:
         if self.state.example:
             content.insert(0, ft.Container(ft.Row([
                 ft.Icon(ft.Icons.SCIENCE_OUTLINED, color=AMBER, size=17),
-                self.text("Example workspace · synthetic transfers, no live funds or signing", 12, AMBER, expand=True),
+                self.text("Demo wallet · simulated transfers", 12, AMBER, expand=True),
                 ft.TextButton("Return to live", on_click=self.return_live, style=ft.ButtonStyle(color=AMBER)),
             ]), bgcolor="#FFF3DF", padding=ft.Padding.symmetric(horizontal=16, vertical=4), border_radius=9))
         if (self.page.width or 1200) >= 1180:
@@ -409,8 +415,15 @@ class InboxUI:
                    icon=ft.Icons.SWAP_HORIZ_ROUNDED, on_click=self.toggle_transaction, disabled=self.state.busy)]
         if not self.show_transaction:
             options.extend(self.history_options())
-            options.append(ft.TextButton("Check a live sample", icon=ft.Icons.FACT_CHECK_OUTLINED,
-                on_click=self.live_sample, disabled=self.state.busy))
+            if self.state.example:
+                options.extend([
+                    ft.TextButton("Copy demo wallet", icon=ft.Icons.CONTENT_COPY_ROUNDED, on_click=self.copy_demo_wallet),
+                    ft.TextButton("Show simulated Stream delivery", icon=ft.Icons.DYNAMIC_FEED_OUTLINED,
+                                  on_click=self.example_stream, disabled=self.state.busy),
+                ])
+            else:
+                options.append(ft.TextButton("Check a live sample", icon=ft.Icons.FACT_CHECK_OUTLINED,
+                    on_click=self.live_sample, disabled=self.state.busy))
             if self.show_history:
                 controls.append(ft.Row([self.end_block, self.text("Use a Base Sepolia block number to revisit an older window.", 11, MUTED)],
                     wrap=True, spacing=12))
@@ -430,7 +443,7 @@ class InboxUI:
             history_label = f"History options · end block {self.end_block.value.strip()[:16]}"
         options = [ft.TextButton(history_label,
             icon=ft.Icons.HISTORY_ROUNDED, on_click=self.toggle_history, disabled=self.state.busy)]
-        if getattr(getattr(self.service, "settings", None), "stream_enabled", False):
+        if not self.state.example and getattr(getattr(self.service, "settings", None), "stream_enabled", False):
             options.append(ft.TextButton("Search Stream index", icon=ft.Icons.DYNAMIC_FEED_OUTLINED,
                 on_click=self.scan_index, disabled=self.state.busy))
         return options
@@ -576,7 +589,7 @@ class InboxUI:
         if item.get("forward_state"):
             values.append(self.value_line("Circle delivery report", item["forward_state"].title()))
         if item.get("discovery_source"):
-            discovery = {"stream": "Stream delivery", "rpc": "Source RPC history",
+            discovery = {"stream": "Stream delivery", "example_stream": "Simulated Stream delivery", "rpc": "Source RPC history",
                          "receipt": "Base Sepolia receipt"}[item["discovery_source"]]
             values.append(self.value_line("Discovered via", discovery))
         if item.get("checked_at"):
@@ -810,6 +823,9 @@ class InboxUI:
         await self.scan(mode="transaction")
 
     async def open_case(self, route: str) -> None:
+        if route.partition("?")[0].rstrip("/") == "/demo":
+            self.examples()
+            return
         if not route.startswith("/transfer/"):
             return
         path = urlsplit(route).path
@@ -882,10 +898,26 @@ class InboxUI:
         self.render()
 
     def examples(self, _=None) -> None:
+        self.show_transaction = False
+        self.wallet_input.value = EXAMPLE_WALLET
         self.state.load_examples()
         self.render()
 
+    def example_stream(self, _=None) -> None:
+        if not self.state.example or self.state.busy:
+            return
+        self.wallet_input.value = EXAMPLE_WALLET
+        self.state.load_examples(stream=True)
+        self.inspect(self.state.transfers[0])
+
+    async def copy_demo_wallet(self, _=None) -> None:
+        if self.state.example:
+            await self.clipboard.set(EXAMPLE_WALLET)
+            self.page.show_dialog(ft.SnackBar(content=self.text("Demo wallet copied", color="#FFFFFF")))
+
     def return_live(self, _=None) -> None:
+        if (self.wallet_input.value or "").strip().lower() == EXAMPLE_WALLET:
+            self.wallet_input.value = self.state.wallet
         self.state = InboxState(wallet=self.state.wallet)
         self.render()
 

@@ -1,7 +1,7 @@
 """Synthetic presentation data. Never valid input for a chain transaction."""
 from copy import deepcopy
 
-EXAMPLE_WALLET = "0x1111111111111111111111111111111111111111"
+EXAMPLE_WALLET = "0x05af7613449b84f2a02893d35e6cdee479404ce8"
 EXAMPLE_CALLER = "0x2222222222222222222222222222222222222222"
 
 
@@ -27,3 +27,11 @@ def example_transfers() -> list[dict]:
             "source_url": None, "destination_url": None,
         })
     return deepcopy(result)
+
+
+def example_stream_transfer() -> dict:
+    return example_transfers()[0] | {
+        "key": "example-stream-delivery",
+        "discovery_source": "example_stream",
+        "explanation": "A simulated Stream delivery added this burn to the demo inbox.",
+    }
