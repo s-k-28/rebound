@@ -10,4 +10,4 @@ USER rebound
 ENV REBOUND_DB=/app/data/rebound.sqlite3
 EXPOSE 8765
 # Hosts such as Render, Railway and Fly inject PORT; local runs keep 8765.
-CMD ["sh", "-c", "exec /app/.venv/bin/uvicorn rebound.app:app --host 0.0.0.0 --port \"${PORT:-8765}\" --proxy-headers --forwarded-allow-ips '*'"]
+CMD ["sh", "-c", "exec /app/.venv/bin/uvicorn rebound.app:app --host 0.0.0.0 --port \"${PORT:-8765}\" --proxy-headers"]
