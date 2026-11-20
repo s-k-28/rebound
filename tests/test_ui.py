@@ -253,6 +253,88 @@ async def test_obsolete_selection_does_not_scroll_the_current_view(monkeypatch):
     await app.finish_inspector_reveal({"key": "old-transfer"})
 
 
+@pytest.mark.parametrize("motion_enabled", [False, True])
+async def test_initial_deep_link_does_not_require_a_client_scroll_listener(monkeypatch, motion_enabled):
+    tx_hash = "0x" + "aa" * 32
+    item = {"key": "initial-case", "tx_hash": tx_hash, "log_index": 4, "status": "completed"}
+    pending = []
+    class Page:
+        width = 390
+        def run_task(self, handler, *args):
+            pending.append((handler, args))
+    class CaseService:
+        async def inspect_transaction(self, source_hash, *, log_index):
+            return {"transfers": [item], "coverage": "One source receipt"}
+    app = ui.InboxUI(Page(), CaseService())
+    app._installed = True
+    app.motion_enabled = motion_enabled
+    monkeypatch.setattr(app, "render", lambda: None)
+    monkeypatch.setattr(app.inspector_host, "update", lambda: None)
+    async def not_mounted(**_kwargs):
+        raise RuntimeError("Timeout waiting for invoke method listener for Column(22).scroll_to")
+    monkeypatch.setattr(app.workspace_view, "scroll_to", not_mounted)
+    await app.navigate(f"/transfer/{tx_hash}/4")
+    for handler, args in pending:
+        await handler(*args)
+    assert app.state.selected is item
+
+
+async def test_new_case_after_demo_still_resets_existing_mobile_scroll(monkeypatch):
+    tx_hash = "0x" + "aa" * 32
+    item = {"key": "next-case", "tx_hash": tx_hash, "log_index": 4, "status": "completed"}
+    pending, scrolled = [], []
+    class Page:
+        width = 390
+        def run_task(self, handler, *args):
+            pending.append((handler, args))
+    class CaseService:
+        async def inspect_transaction(self, source_hash, *, log_index):
+            return {"transfers": [item], "coverage": "One source receipt"}
+    app = ui.InboxUI(Page(), CaseService())
+    app._installed = True
+    monkeypatch.setattr(app, "render", lambda: None)
+    async def reset_scroll(**kwargs):
+        scrolled.append(kwargs)
+    monkeypatch.setattr(app.workspace_view, "scroll_to", reset_scroll)
+    await app.navigate("/demo")
+    await app.navigate(f"/transfer/{tx_hash}/4")
+    for handler, args in pending:
+        await handler(*args)
+    assert scrolled == [{"offset": 0, "duration": 0}]
+
+
+@pytest.mark.parametrize("error", [
+    RuntimeError("Session closed"),
+    RuntimeError("Timeout waiting for invoke method listener for Column(22).scroll_to"),
+    RuntimeError("TimeoutException after 0:00:10.000000: Timeout waiting for invoke method listener for Column(22).scroll_to"),
+    TimeoutError("Timeout waiting for invokeMethod scroll_to call"),
+])
+async def test_visual_scroll_tolerates_known_client_lifecycle_failures(monkeypatch, error):
+    class Page:
+        width = 390
+    app = ui.InboxUI(Page(), RecordingService())
+    item = {"key": "selected"}
+    app.state.selected = item
+    async def disconnected(**_kwargs):
+        raise error
+    monkeypatch.setattr(app.workspace_view, "scroll_to", disconnected)
+    await app.finish_inspector_reveal(item)
+    assert app.state.selected is item
+
+
+async def test_visual_scroll_does_not_hide_unrelated_runtime_failures(monkeypatch):
+    class Page:
+        width = 390
+    app = ui.InboxUI(Page(), RecordingService())
+    item = {"key": "selected"}
+    app.state.selected = item
+    async def broken_scroll(**_kwargs):
+        raise RuntimeError("Unexpected invalid scroll state")
+    monkeypatch.setattr(app.workspace_view, "scroll_to", broken_scroll)
+    with pytest.raises(RuntimeError, match="Unexpected invalid scroll state"):
+        await app.finish_inspector_reveal(item)
+
+
 async def test_example_cannot_prepare_even_if_action_is_called_directly():
     state = ui.InboxState()
     state.load_examples()

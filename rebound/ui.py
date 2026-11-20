@@ -865,6 +865,7 @@ class InboxUI:
     async def navigate(self, route: str) -> None:
         if route == self._active_route:
             return
+        initial_mount = self._active_route is None
         self._active_route = route
         # Flet can reconnect an existing page session after browser navigation.
         # Drop the previous page's financial state before processing its new URL.
@@ -874,9 +875,9 @@ class InboxUI:
         self.refresh_error = ""
         self.show_transaction = False
         self.render()
-        await self.open_case(route)
+        await self.open_case(route, reset_scroll=not initial_mount)
 
-    async def open_case(self, route: str) -> None:
+    async def open_case(self, route: str, *, reset_scroll: bool = True) -> None:
         if route.partition("?")[0].rstrip("/") == "/demo":
             self.examples()
             return
@@ -896,7 +897,7 @@ class InboxUI:
         if self.state is state and len(state.transfers) == 1:
             item = state.transfers[0]
             if (item["tx_hash"], item["log_index"]) == (tx_hash.lower(), int(index)):
-                self.inspect(item)
+                self.inspect(item, reset_scroll=reset_scroll)
 
     async def refresh_transfer(self, _=None) -> None:
         state, item = self.state, self.state.selected
@@ -980,7 +981,7 @@ class InboxUI:
         self.clear_hidden_selection()
         self.render()
 
-    def inspect(self, item) -> None:
+    def inspect(self, item, *, reset_scroll: bool = True) -> None:
         changed = item is not self.state.selected
         self.state.selected = item
         self.state.prepared = None
@@ -989,10 +990,10 @@ class InboxUI:
         self.refresh_error = ""
         self._revealing_item = item if changed and self.motion_enabled else None
         self.render()
-        if self._installed and changed:
-            self.page.run_task(self.finish_inspector_reveal, item)
+        if self._installed and changed and (reset_scroll or self.motion_enabled):
+            self.page.run_task(self.finish_inspector_reveal, item, reset_scroll)
 
-    async def finish_inspector_reveal(self, item: dict) -> None:
+    async def finish_inspector_reveal(self, item: dict, reset_scroll: bool = True) -> None:
         if self._revealing_item is item:
             await asyncio.sleep(0.035)
             if self.state.selected is not item or self._revealing_item is not item:
@@ -1001,9 +1002,21 @@ class InboxUI:
             self.inspector_host.animate_opacity = ft.Animation(180, ft.AnimationCurve.EASE_OUT_CUBIC)
             self.inspector_host.opacity = 1
             self.inspector_host.update()
-        if self.state.selected is item:
+        if reset_scroll and self.state.selected is item:
             detail_scroll = self.inspector_scroll if self.split_workspace else self.workspace_view
-            await detail_scroll.scroll_to(offset=0, duration=0)
+            try:
+                await detail_scroll.scroll_to(offset=0, duration=0)
+            except TimeoutError:
+                return  # The visual reset may outlive the client connection.
+            except RuntimeError as exc:
+                # A cosmetic reset can race a browser disconnect or the Flutter
+                # listener mounting. Do not mask unrelated UI/programming errors.
+                if str(exc) != "Session closed" and not re.fullmatch(
+                    r"(?:TimeoutException after [0-9:.]+: )?"
+                    r"Timeout waiting for invoke method listener for Column\([0-9]+\)\.scroll_to",
+                    str(exc),
+                ):
+                    raise
 
     def back(self, _=None) -> None:
         self.state.selected = None
