@@ -104,16 +104,17 @@ See the [QuickNode setup guide](docs/QUICKNODE.md) for configuration and verific
 
 | State | Meaning and next step |
 |---|---|
-| Confirming | The source burn needs more confirmations; refresh later |
-| Awaiting attestation | Circle has not returned a usable signed message yet; do not burn again |
-| Ready | Current checks allow preparation; select the actual caller and revalidate |
+| Source confirming | The source burn needs more confirmations; refresh later |
+| Waiting for Circle | Circle has not returned a usable signed message yet; do not burn again |
+| Ready to finish | Current checks allow preparation; select the actual caller and revalidate |
 | Caller required | The message restricts who can call the destination contract; the recipient is not automatically authorized |
-| Expired | The existing burn needs a refreshed attestation. [Circle's re-attestation procedure](https://developers.circle.com/cctp/references/technical-guide#message-body) |
+| Attestation expired | The existing burn needs a refreshed attestation. [Circle's re-attestation procedure](https://developers.circle.com/cctp/references/technical-guide#message-body) |
 | Forwarded transfer | The burn requested Circle forwarding. Check the original app while Arc’s nonce is unused. |
 | Completed | Destination nonce is already consumed; another mint is unnecessary |
-| Source changed | Source evidence no longer matches the canonical receipt/block; inspect rather than sending |
-| Unsupported | The route, message, hook or adapter is outside this version's coverage |
-| Unavailable | A required source could not be verified; no recovery transaction is prepared |
+| Source needs review | Source evidence no longer matches the canonical receipt/block; inspect rather than sending |
+| Outside current support | The route, message, hook or adapter is outside this version's coverage |
+| Mint submitted | A destination transaction was submitted; check its receipt before attempting another mint |
+| Could not verify | A required source could not be verified; no recovery transaction is prepared. Try again before taking any action |
 
 Circle's attestation status `complete` is **not** proof that the destination mint happened. The original recipient cannot be changed. Recovery here means finishing an existing mint, not refunding or reversing a transfer.
 
