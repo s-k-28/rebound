@@ -6,12 +6,15 @@ Rebound finds interrupted USDC transfers from a public wallet address. It checks
 
 Read the [PRD](docs/PRD.md), [implementation and release plan](docs/superpowers/plans/2026-11-19-rebound.md), [live demo procedure](docs/DEMO.md), [controlled testnet lab](docs/LAB.md) and [QuickNode setup](docs/QUICKNODE.md).
 
-![Rebound transfer workspace showing labeled synthetic examples](docs/images/workspace.jpg)
+![Rebound inspector showing the live 1 USDC transfer: Base Sepolia burn verified, Circle attestation matched, Arc mint completed 99 s after the burn](docs/images/live-completed-case.jpg)
+
+*Live Base Sepolia and Arc Testnet data, captured November 20, 2026.*
 
 ## Submission at a glance
 
 | Field | Entry |
 |---|---|
+| Team | Siddartha Kodithyala, Anay Goyal, Areeb Hirani, Parth Patel |
 | Main track | DeFi and Onchain Applications |
 | Chain award | Best use of Arc |
 | Bounties | None claimed. The QuickNode Streams adapter is implemented, but live provider delivery of a real burn is still pending ([status](#quicknode-streams-integration)). |
@@ -27,6 +30,16 @@ Read the [PRD](docs/PRD.md), [implementation and release plan](docs/superpowers/
 3. **Match Circle.** It pulls the signed message from Circle's attestation API and compares amount, recipient, caller restriction, fee, finality and hook against the original burn.
 4. **Read Arc.** It reads `usedNonces` on Arc's MessageTransmitterV2. A used nonce means Completed, whatever Circle's status says; an unused nonce with a valid attestation means Ready to finish.
 5. **Finish once.** For a ready transfer, it simulates `receiveMessage(message, attestation)` on Arc from your caller and shows the unsigned transaction. The local CLI signs and broadcasts once after explicit approval, then checks the Arc `MessageReceived` event against the original nonce.
+
+## Try it in two minutes
+
+After [running locally](#run-locally), follow the same steps as the demo video. Everything below reads public testnet state; nothing is signed in the browser.
+
+1. **Find by address.** Open `http://127.0.0.1:8765`, paste `0x395809d8da4a70145d5060448070a15367df722c` and select **Check a live sample**. Rebound scans a fixed 200-block Base Sepolia window ending at block 61,175,721 and finds the controlled 1 USDC transfer.
+2. **Read the proof.** Select the row. The inspector shows the verified Base burn, the matched Circle attestation and the completed Arc mint, 99 s after the burn, with a link to the verified Arc receipt.
+3. **Review a recovery.** Open `http://127.0.0.1:8765/transfer/0x9064f18850c6a86cdea854175835f8eabb3a20eb06a2f1598f6fa0675cc950b5/5`, a second real burn that was still unminted on November 20. Under **Finish the transfer**, enter `0x395809d8da4a70145d5060448070a15367df722c` and select **Review recovery**. Rebound simulates `receiveMessage` on Arc and shows the unsigned transaction and gas budget in USDC. If someone has finished it since, the inspector shows **Completed** instead.
+4. **See the duplicate refusal.** Run `uv run python -m rebound.cli prepare 0x7e4334109c120f9da71e01116190804a9d91f2fd5ec07cfd7196a649e68e3f23 4 --caller 0x395809d8da4a70145d5060448070a15367df722c`. It exits with "Transfer is completed. Arc has already consumed this message's nonce."
+5. **Explore every state.** Open `http://127.0.0.1:8765/demo` for clearly labelled synthetic examples of Waiting for Circle, Caller required and the other states.
 
 ## Run locally
 
