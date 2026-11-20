@@ -22,11 +22,12 @@ The controlled testnet workflow has verified receipts and a duplicate-preparatio
    uv run uvicorn rebound.app:app --host 127.0.0.1 --port 8765
    ```
 5. Check the inspector's Arc expiry block before the run.
+6. Match the scan length to the burn's age. Base Sepolia produced about 5 blocks per second on November 20, so 2,000 blocks covers about 7 minutes, 10,000 about 33 minutes and 50,000 about 2.8 hours. Record within a few minutes of Ready, or pick the longer length before selecting **Find transfers**.
 
 | Time | Screen | Narration |
 |---|---|---|
 | 0:00–0:20 | The controlled burn on Basescan. Arc has no mint yet. | We paused this 1-USDC testnet transfer after the Base Sepolia burn. Its original mint is still waiting on Arc. |
-| 0:20–0:45 | A fresh Rebound tab. Paste only the wallet address and select **Find transfers**. | All we have is the wallet address: no transaction hash and no bridge link. Rebound finds the burn and shows the exact block range it searched. |
+| 0:20–0:45 | A fresh Rebound tab. Paste only the wallet address, set the scan length to cover the burn (step 6), and select **Find transfers**. | All we have is the wallet address: no transaction hash and no bridge link. Rebound finds the burn and shows the exact block range it searched. |
 | 0:45–1:15 | Select the **Ready to finish** row. Point to each proof step, then to the recipient and the actual amounts shown. | Rebound compares the Base receipt with Circle's signed message and confirms the Arc nonce is unused. The signed message fixes the recipient, and the amounts show Circle's fee and the net mint. |
 | 1:15–1:40 | Enter the caller address and select **Review recovery**. | Rebound simulates the finishing call from the signer’s address and displays the current Arc gas estimate. The local command applies the gas cap before signing. |
 | 1:40–2:05 | In the terminal, run `uv run python -m rebound.cli recover "$BURN_TX_HASH" "$LOG_INDEX" --caller "$WALLET"` and type `RECOVER`. **Cut the key entry.** End on "Destination mint confirmed". | Signing happens locally. The tool checks everything again, asks for an explicit approval, broadcasts once, and verifies the Arc receipt against the original message. |
