@@ -20,7 +20,8 @@ FILTER = Path(__file__).resolve().parent.parent / "streams" / "filter.js"
 
 
 def stream_row(**overrides):
-    row = {"discovery_source": "stream", "source_verified": True, "block_number": 61_175_721,
+    row = {"discovery_source": "stream", "source_verified": True, "source_confirmations": 12,
+           "block_number": 61_175_721,
            "source_url": "https://sepolia.basescan.org/tx/0x" + "ab" * 32, "stream_received_at": 1_795_000_000,
            "checked_at": "2026-11-20T10:00:00+00:00", "status": "ready", "attestation_matched": True,
            "nonce_used": False, "stream_signed": True}
@@ -34,7 +35,7 @@ def test_stream_transfer_shows_three_verified_steps_tied_to_its_evidence():
     assert [s.key for s in steps] == ["burn", "delivery", "status"]
     assert [s.state for s in steps] == ["verified"] * 3
     assert "61,175,721" in steps[0].detail and steps[0].url.endswith("ab" * 32)
-    assert "QuickNode signature verified" in steps[1].detail and "Block hash matched" in steps[1].detail
+    assert "HMAC authentication verified" in steps[1].detail and "block hash matched" in steps[1].detail
     assert "2026" in steps[1].detail
     assert "Ready to finish" in steps[2].detail and "Circle attestation matched" in steps[2].detail
     assert "Arc nonce unused" in steps[2].detail
@@ -48,7 +49,7 @@ def test_transfers_not_found_by_a_stream_get_no_quicknode_claim(source):
 def test_simulated_delivery_is_labelled_simulated_everywhere():
     steps = q.evidence_steps({"discovery_source": "example_stream", "example": True, "block_number": 9}, "Ready")
     assert [s.state for s in steps] == ["simulated"] * 3
-    assert "Not a QuickNode event" in steps[1].detail
+    assert "Synthetic endpoint delivery" in steps[1].detail
 
 
 def test_unverified_source_or_unfinished_checks_stay_pending():
@@ -62,23 +63,23 @@ def test_unverified_source_or_unfinished_checks_stay_pending():
 
 def test_missing_delivery_time_still_reports_the_block_hash_match():
     steps = q.evidence_steps(stream_row(stream_received_at=None), "Ready to finish")
-    assert steps[1].detail == "QuickNode signature verified. Block hash matched."
+    assert "HMAC authentication verified" in steps[1].detail and "Received" not in steps[1].detail
 
 
 def test_unsigned_delivery_is_never_presented_as_a_quicknode_delivery():
     """A shared-secret adapter test reaches the same index but proves nothing about QuickNode."""
     row = stream_row(stream_signed=False)
     steps = q.evidence_steps(row, "Ready to finish")
-    assert [s.state for s in steps] == ["verified", "pending", "verified"]
-    assert "without a QuickNode signature" in steps[1].detail
-    assert q.delivered_by_quicknode(row) is False
-    assert q.delivered_by_quicknode(stream_row()) is True
+    assert [s.state for s in steps] == ["verified", "observed", "verified"]
+    assert "No HMAC payload evidence" in steps[1].detail
+    assert q.authenticated_stream_payload(row) is False
+    assert q.authenticated_stream_payload(stream_row()) is True
     # Rows stored before signatures were tracked carry no flag and get the same conservative reading.
-    assert q.delivered_by_quicknode({k: v for k, v in stream_row().items() if k != "stream_signed"}) is False
+    assert q.authenticated_stream_payload({k: v for k, v in stream_row().items() if k != "stream_signed"}) is False
 
 
-def test_a_transfer_found_by_history_is_never_quicknode_delivered_even_if_flagged():
-    assert q.delivered_by_quicknode(stream_row(discovery_source="rpc")) is False
+def test_a_plain_rpc_transfer_cannot_carry_stream_authentication():
+    assert q.authenticated_stream_payload(stream_row(discovery_source="rpc")) is False
 
 
 # ------------------------------------------------------- walkthrough checks
@@ -88,26 +89,29 @@ def checks(**overrides):
     return {step.key: step for step in q.walkthrough_checks(**args)}
 
 
-def test_five_separate_checks_start_with_only_documented_and_simulated_evidence():
+def test_six_separate_checks_start_with_only_documented_and_simulated_evidence():
     result = checks()
-    assert list(result) == ["sample", "simulated", "live", "discovery", "mint"]
+    assert list(result) == ["sample", "simulated", "authenticated", "live", "discovery", "mint"]
     assert result["sample"].state == "observed" and result["simulated"].state == "simulated"
-    assert [result[k].state for k in ("live", "discovery", "mint")] == ["pending"] * 3
+    assert [result[k].state for k in ("authenticated", "live", "discovery", "mint")] == ["pending"] * 4
 
 
 def test_disabled_ingestion_is_pending_not_an_error():
-    live = checks(enabled=False, delivered=3)["live"]
-    assert live.state == "pending" and "not enabled" in live.detail
+    authenticated = checks(enabled=False, delivered=3)["authenticated"]
+    assert authenticated.state == "pending" and "not enabled" in authenticated.detail
 
 
-def test_live_delivery_needs_a_quicknode_signed_event_in_the_index():
-    live = checks(delivered=2, last_received=1_795_000_000)["live"]
-    assert live.state == "verified" and "2 burns" in live.detail and "QuickNode signature" in live.detail
+def test_hmac_authentication_does_not_confirm_actual_provider_delivery():
+    result = checks(delivered=2, last_received=1_795_000_000)
+    proof = result["authenticated"]
+    assert proof.state == "verified" and "2 indexed burns" in proof.detail and "HMAC authentication" in proof.detail
+    assert result["live"].state == "pending"
 
 
 def test_adapter_deliveries_do_not_count_as_live_stream_delivery():
     result = checks(delivered=0, local=1, transfers=[stream_row(stream_signed=False)])
-    assert result["live"].state == "pending" and "not a QuickNode delivery" in result["live"].detail
+    assert result["live"].state == "pending" and result["authenticated"].state == "pending"
+    assert "shared-secret adapter" in result["authenticated"].detail
     assert result["discovery"].state == "pending" and result["mint"].state == "pending"
 
 
@@ -116,10 +120,11 @@ def test_discovery_and_mint_are_not_implied_by_each_other_or_by_simulations():
     assert only_rpc["discovery"].state == "pending"
     found = checks(delivered=1, transfers=[stream_row()])
     assert found["discovery"].state == "verified" and found["mint"].state == "pending"
-    done = checks(delivered=1, transfers=[stream_row(status="completed", destination_url="https://arc/tx/0x1")])
+    done = checks(delivered=1, transfers=[stream_row(status="completed", nonce_used=True,
+                                                    destination_url="https://arc/tx/0x1")])
     assert done["mint"].state == "verified" and done["mint"].url == "https://arc/tx/0x1"
     # Completed but with no Arc receipt link is not evidence of a mint.
-    no_receipt = checks(delivered=1, transfers=[stream_row(status="completed", destination_url=None)])
+    no_receipt = checks(delivered=1, transfers=[stream_row(status="completed", nonce_used=True, destination_url=None)])
     assert no_receipt["mint"].state == "pending"
 
 
@@ -284,10 +289,10 @@ async def test_search_rows_carry_the_signature_status(setup_service):
     enable(service)
     service.ingest_logs([burn_log()])
     row = (await service.scan_stream(WALLET))["transfers"][0]
-    assert row["stream_signed"] is False and q.delivered_by_quicknode(row) is False
+    assert row["stream_signed"] is False and q.authenticated_stream_payload(row) is False
     service.ingest_logs([burn_log()], signed=True)
     row = (await service.scan_stream(WALLET))["transfers"][0]
-    assert row["stream_signed"] is True and q.delivered_by_quicknode(row) is True
+    assert row["stream_signed"] is True and q.authenticated_stream_payload(row) is True
 
 
 def test_stream_status_reads_the_index_and_separates_signed_from_adapter_deliveries(setup_service):
@@ -378,48 +383,45 @@ def inbox(service=None, *, width=1440):
 
 def test_quicknode_search_is_labelled_and_next_to_the_main_lookup():
     text = screen_text(inbox().scan_panel())
-    assert "Find transfers via QuickNode" in text and "QuickNode walkthrough" in text
-    # The old buried label is gone, and only the one search entry point exists.
-    assert "Search Stream index" not in text
+    assert text.count("Search Stream index") == 1 and "QuickNode walkthrough" in text
 
 
 def test_quicknode_search_stays_available_when_ingestion_is_off_so_the_reason_can_be_shown():
     from types import SimpleNamespace
     app = inbox(SimpleNamespace(settings=SimpleNamespace(stream_enabled=False)))
-    assert "Find transfers via QuickNode" in screen_text(app.scan_panel())
+    assert "Search Stream index" in screen_text(app.scan_panel())
 
 
 def test_synthetic_demo_does_not_offer_the_live_quicknode_search():
     app = inbox()
     app.state.load_examples(stream=True)
-    assert "Find transfers via QuickNode" not in screen_text(app.scan_panel())
+    assert "Search Stream index" not in screen_text(app.scan_panel())
 
 
-def test_inspector_shows_the_discovery_label_and_evidence_flow_only_for_stream_transfers():
+def test_inspector_adds_endpoint_evidence_only_for_stream_transfers():
     app = inbox()
     shown = screen_text(app.quicknode_evidence(stream_row(status="ready")))
-    assert "Discovered via QuickNode Streams" in shown
-    assert "Burn confirmed" in shown and "Delivered by QuickNode" in shown and "Transfer status verified" in shown
-    assert "61,175,721" in shown and "View original burn" in shown
+    assert "Authenticated Stream payload" in shown and "independent provider dashboard evidence" in shown
+    assert "Burn confirmed" not in shown and "Transfer status verified" not in shown
     assert app.quicknode_evidence(stream_row(discovery_source="rpc", status="ready")) is None
     simulated = screen_text(app.quicknode_evidence({"discovery_source": "example_stream", "example": True,
                                                    "block_number": 9, "status": "ready"}))
-    assert "Simulated Stream delivery" in simulated and "Discovered via QuickNode Streams" not in simulated
+    assert "Simulated Stream delivery" in simulated and "Authenticated Stream payload" not in simulated
 
 
-def test_record_names_the_provider_for_stream_discoveries():
+def test_record_identifies_authenticated_stream_payloads():
     shown = screen_text(inbox().record(stream_row(tx_hash="0x" + "ab" * 32, status="ready", caller="0x" + "00" * 20)))
-    assert "Discovered via" in shown and "QuickNode Streams" in shown
+    assert "Discovered via" in shown and "Authenticated Stream payload" in shown
 
 
 def test_unsigned_stream_delivery_is_labelled_as_an_endpoint_test_not_quicknode():
     app = inbox()
     row = stream_row(tx_hash="0x" + "ab" * 32, status="ready", caller="0x" + "00" * 20, stream_signed=False)
     record = screen_text(app.record(row))
-    assert "Stream endpoint (no QuickNode signature)" in record and "QuickNode Streams |" not in record
+    assert "Stream endpoint (shared-secret adapter)" in record and "Authenticated Stream payload" not in record
     evidence = screen_text(app.quicknode_evidence(row))
-    assert "Stream endpoint test (no QuickNode signature)" in evidence
-    assert "Discovered via QuickNode Streams" not in evidence
+    assert "Shared-secret adapter payload" in evidence
+    assert "Authenticated Stream payload" not in evidence
 
 
 def test_empty_stream_result_explains_what_was_and_was_not_searched():
