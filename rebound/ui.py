@@ -23,9 +23,9 @@ AMBER = "#A96714"
 FOREST = "#173B32"
 MINT = "#C9E8D8"
 
-# Historical public burn documented in docs/VALIDATION.md. Status is checked live.
-LIVE_SAMPLE_WALLET = "0x41f7337769003aec9b0b20789403f8c741d7faad"
-LIVE_SAMPLE_END_BLOCK = 61_125_511
+# Controlled testnet recovery documented in PR #3. Status is checked live.
+LIVE_SAMPLE_WALLET = "0x395809d8da4a70145d5060448070a15367df722c"
+LIVE_SAMPLE_END_BLOCK = 61_175_721
 LIVE_SAMPLE_BLOCKS = 200
 CASE_PATH = re.compile(r"/transfer/(0x[0-9a-fA-F]{64})/([0-9]{1,8})/?", re.ASCII)
 

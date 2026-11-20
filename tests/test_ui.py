@@ -94,6 +94,21 @@ async def test_shared_case_rechecks_one_public_source_event(monkeypatch):
     assert app.case_link(item | {"example": True}) is None
 
 
+async def test_live_sample_scans_the_controlled_recovery_wallet_and_fixed_window(monkeypatch):
+    tx_hash = "0x7e4334109c120f9da71e01116190804a9d91f2fd5ec07cfd7196a649e68e3f23"
+    item = {"key": "controlled-recovery", "tx_hash": tx_hash, "log_index": 4, "status": "completed"}
+    class ControlledSample:
+        async def scan(self, wallet, *, blocks, end_block):
+            assert wallet == "0x395809d8da4a70145d5060448070a15367df722c"
+            assert (blocks, end_block) == (200, 61175721)
+            return {"transfers": [item], "coverage": "Controlled recovery source window"}
+    app = ui.InboxUI(object(), ControlledSample())
+    monkeypatch.setattr(app, "render", lambda: None)
+    await app.live_sample()
+    assert app.state.example is False
+    assert app.state.transfers == [item]
+
+
 async def test_route_change_replaces_selected_demo_with_the_requested_live_case(monkeypatch):
     tx_hash = "0x" + "aa" * 32
     item = {"key": "live-case", "tx_hash": tx_hash, "log_index": 4, "status": "completed"}
