@@ -96,6 +96,13 @@ def test_expiration_boundary_and_zero_expiration():
     assert p.classify(p.decode_message(message_hex(expiration=0)), nonce_used=False, destination_block=100) == "ready"
 
 
+def test_attestation_expiring_in_the_next_destination_block_is_expired():
+    # TokenMessengerV2 requires expirationBlock > block.number. After Arc head 100,
+    # a new receiveMessage can execute in block 101 at the earliest.
+    assert p.classify(p.decode_message(message_hex(expiration=101)), nonce_used=False, destination_block=100) == "expired"
+    assert p.classify(p.decode_message(message_hex(expiration=102)), nonce_used=False, destination_block=100) == "ready"
+
+
 def test_restricted_caller_does_not_authorize_recipient_automatically():
     m = p.decode_message(message_hex(caller=OTHER))
     assert p.classify(m, nonce_used=False, destination_block=1, caller=WALLET) == "caller_required"
