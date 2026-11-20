@@ -60,4 +60,4 @@ This maps to steps 1–7 of DEMO.md's recording sequence. The lab only produces 
 
 - **Testnet only:** Base Sepolia → Arc Testnet with canonical USDC. Not for mainnet keys or real funds.
 - **Anyone can mint it:** a zero `destinationCaller` lets anyone submit the mint once Circle attests. Nothing on testnet is expected to, but if someone does, Rebound correctly shows Completed. Do not mint it yourself any other way.
-- **Not verified live yet:** the tests use RPC doubles and a fixed fixture key. The dry run has been checked read-only against the public Base Sepolia RPC and Circle's sandbox, but no live burn has been broadcast from this branch yet.
+- **Verified live:** on November 20 this tool broadcast a 1 USDC Base Sepolia burn that Rebound then found by wallet address and finished on Arc ([controlled recovery](LIVE-RECOVERY.md)). The automated tests still use RPC doubles and a fixed fixture key.

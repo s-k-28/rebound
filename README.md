@@ -54,13 +54,19 @@ Use **History options** in the browser or `--end-block` in the CLI to revisit a 
 
 **Refresh this transfer** rechecks the selected source receipt, matching Circle message and Arc nonce without rerunning the wallet scan. **Copy evidence** copies the public transfer identifiers, amounts, verification time and receipt links for a support ticket or demo.
 
-When a completed transfer lacks a receipt link, paste the Arc transaction hash under **Verify a submitted Arc receipt**. Rebound checks that the canonical Arc receipt contains the original mint message and nonce, then adds its verified link.
+When a completed transfer lacks a receipt link, paste the Arc transaction hash in the inspector and select **Verify Arc receipt**. Rebound checks that the canonical Arc receipt contains the original mint message and nonce, then adds its verified link.
 
-**Copy live case link** opens the exact source transaction and event index on the same Rebound deployment. The recipient of the link gets a fresh chain check.
+**Copy case link** opens the exact source transaction and event index on the same Rebound deployment. The recipient of the link gets a fresh chain check.
 
 Open `/demo` or search for `0x05af7613449b84f2a02893d35e6cdee479404ce8` to use the synthetic wallet. **Show simulated Stream delivery** opens an example of the Stream discovery workflow. This demo uses local fixture data and cannot prepare a transaction.
 
-For a real Base Sepolia backfill, use the public wallet and source block from the controlled run. The [validation notes](docs/VALIDATION.md#reproduce-the-read-only-check) include an independent historical case.
+For a real Base Sepolia backfill, select **Check a live sample** or scan the controlled run's fixed window. The default 2,000-block window ends at the current head and no longer reaches this burn. The command returns the completed 1-USDC transfer and its verified Arc receipt:
+
+```bash
+uv run python -m rebound.cli scan 0x395809d8da4a70145d5060448070a15367df722c --blocks 200 --end-block 61175721
+```
+
+The [validation notes](docs/VALIDATION.md#reproduce-the-read-only-check) include an independent historical case.
 
 For a completed direct mint, **Replay historical mint** verifies the original receipt, reads the nonce at the previous block and the receipt block, then simulates the same attestation against the previous block. The replay requires an Arc RPC that serves historical state and uses reads only.
 
@@ -181,6 +187,7 @@ Follow [the detailed demo checklist](docs/DEMO.md). No checked box should imply 
 
 ```bash
 docker build -t rebound .
+test -f .env || cp .env.example .env
 docker run --rm -p 8765:8765 --env-file .env -v rebound-data:/app/data rebound
 ```
 
