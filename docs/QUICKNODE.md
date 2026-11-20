@@ -44,6 +44,10 @@ The machine-readable copy is [`rebound/stream_record.json`](../rebound/stream_re
 
 A user who lost their session may have an address and no transaction hash. RPC discovery is bounded to a selected block window and provider retention or query limits. A configured Stream can filter incoming blocks for successful receipts containing a `DepositForBurn` from Circle's TokenMessengerV2 for native Base Sepolia USDC. Rebound can persist those events and later look them up by wallet. Lookup is a database read, followed by independent source receipt, Circle attestation and Arc requests; verification time depends on those providers. The Stream is a discovery feed and never authorizes recovery by itself.
 
+## Showing the integration without a live delivery
+
+A recording does not need a live Stream. Start the app with `REBOUND_STREAM_SECRET` set and run `REBOUND_STREAM_SECRET=... uv run python scripts/seed_demo_delivery.py`. It delivers the documented controlled burn through the real `/api/streams` endpoint with the shared secret. The walkthrough wallet then finds it from the address alone, and the app labels it **Stream endpoint (no QuickNode signature)**, because it is an endpoint test and not a QuickNode delivery. Say so in the recording. Never describe it as live.
+
 ## Observed state and how to finish the live check
 
 The dated author snapshot reports **Terminated**, 8 errors, 0 blocks sent and last reported block 61,175,720, before the controlled burn. It does not establish a cause or the current state. The author reported an empty Logs tab and a Codespace destination; neither constitutes successful provider delivery evidence.
