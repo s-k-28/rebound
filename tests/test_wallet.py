@@ -548,10 +548,12 @@ async def test_unknown_used_or_malformed_codes_and_tokens_are_refused(wallet_ser
         assert (await http.post("/api/wallet-session/exchange", json={"code": code})).status_code == 200
         assert (await http.post("/api/wallet-session/exchange", json={"code": code})).status_code == 404  # One use.
         assert session.code != code  # A fresh code for "Open wallet tab again".
-        for token in ("b" * 22, "short", session.code):
-            response = await http.get("/api/wallet-session", headers={SESSION_HEADER: token})
+        for token in ("b" * 22, session.code):
+            response = await http.get("/api/wallet-session", headers={SESSION_HEADER: f"Bearer {token}"})
             assert response.status_code == 404
-        assert (await http.get("/api/wallet-session")).status_code == 422
+        short = await http.get("/api/wallet-session", headers={SESSION_HEADER: "Bearer short"})
+        assert short.status_code == 401
+        assert (await http.get("/api/wallet-session")).status_code == 401
         for path in ("/wallet/adapter/" + session.id, f"/api/wallet-sessions/{session.id}"):
             assert (await http.get(path)).status_code == 404
 
@@ -567,7 +569,7 @@ async def test_http_flow_binds_the_claimed_transaction_and_keeps_secrets_out_of_
         exchanged = await http.post("/api/wallet-session/exchange", json={"code": code})
         token = exchanged.json()["token"]
         assert token == session.id and exchanged.headers["cache-control"] == "no-store"
-        auth = {SESSION_HEADER: token}
+        auth = {SESSION_HEADER: f"Bearer {token}"}
         api = "/api/wallet-session"
         bad_chain = await http.post(f"{api}/connected", json={"account": WALLET, "chainId": "0x1"}, headers=auth)
         assert bad_chain.status_code == 400
@@ -642,9 +644,10 @@ const provider = {
 };
 const history = [];
 async function fetch(url, options) {
-  const path = url.slice("/api/wallet-session".length);
+  const address = new URL(url);
+  const path = address.pathname.slice("/api/wallet-session".length);
   const body = options.body ? JSON.parse(options.body) : null;
-  const token = options.headers[scenario.config.header] || null;
+  const token = options.headers[scenario.config.header]?.replace(/^Bearer /, "") || null;
   if (options.method === "POST") posts.push({ path, body, token });
   if ((scenario.code && url.includes(scenario.code)) || (token && url.includes(token))) throw new Error("secret in URL");
   let data = {};
@@ -657,9 +660,10 @@ async function fetch(url, options) {
   return { ok: true, status: 200, json: async () => data };
 }
 const context = { CONFIG: scenario.config, document: { getElementById: () => status },
-  window: { ethereum: provider, addEventListener() {}, location: { hash: "#" + scenario.code, pathname: "/wallet/adapter" },
+  window: { ethereum: provider, addEventListener() {}, location: { hash: "#" + scenario.code,
+    pathname: "/wallet/adapter", origin: "https://rebound.example", href: "https://rebound.example/wallet/adapter" },
     history: { replaceState: (...args) => history.push(args) } },
-  fetch, setTimeout, setInterval, clearInterval, BigInt, Promise, JSON, Number, String, Array, Object, Error };
+  fetch, setTimeout, setInterval, clearInterval, URL, BigInt, Promise, JSON, Number, String, Array, Object, Error };
 vm.runInNewContext(script, context);
 setTimeout(() => {
   console.log(JSON.stringify({ calls, posts, history, status: status.textContent }));

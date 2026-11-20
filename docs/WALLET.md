@@ -35,7 +35,7 @@ Sessions are created in-process by the Flet UI. There is no public create endpoi
 
 - The Flet page holds the session object in Python. The **Connect wallet** link is `/wallet/adapter#<code>`, where the code is a separate 128-bit one-time value. Browsers never send the fragment to a server.
 - The script removes the fragment from the address bar and history, then trades the code in a POST body for the session id. A used code is dead, and a fresh one replaces it for **Open wallet tab again**.
-- The script keeps the id in memory and sends it in the `X-Rebound-Wallet-Session` header.
+- The script keeps the id in memory and uses `Authorization: Bearer <token>` on same-origin requests. Access logs and tracing should redact this header.
 
 | Route | Purpose |
 |---|---|
@@ -59,7 +59,7 @@ On connect, the server runs `RecoveryService.prepare(tx, log, caller=<connected 
 - A maximum above 0.1 testnet USDC (the CLI's default `--max-gas-usdc`) is refused.
 - Flet states: "Your wallet may show a lower final fee; it cannot exceed this maximum unless you edit it in the wallet." Wallets let users edit fees, and Rebound cannot prevent that.
 
-**Send from wallet** carries the review on screen: its generation and its exact transaction. Before anything is awaited, the server refuses the approval if either has changed, for example because the wallet tab reconnected with another account. If the approval has to wait for an earlier attempt's receipt, it checks again after that wait, then reserves the transfer. Once it is `approving`, the session cannot be reconnected. It then runs `prepare` again from the same account. The calldata must be unchanged, the gas estimate must not have risen and the balance must still cover the maximum. Otherwise nothing is approved and the review shows why.
+**Send from wallet** carries the generation and exact transaction captured by the rendered button. The server checks both before any asynchronous work and again after checking the receipt of an earlier attempt. It then reserves the transfer and runs `prepare` again from the same account. The calldata must be unchanged, the gas estimate must not have risen and the balance must still cover the maximum.
 
 The wallet tab sends only what it claimed, and only if all of the following hold. Otherwise it reports `not_sent`:
 
@@ -76,7 +76,7 @@ The wallet tab sends only what it claimed, and only if all of the following hold
   - the tab reports a rejection or that it did not send
   - an approval is not claimed within 90 seconds (nothing reached the wallet)
   - the user, after checking wallet activity, chooses **My wallet sent nothing**. This is offered only in `unknown` or `unrelated`, never while `approving` or `sending`, when the wallet could still submit the claimed transaction.
-- **Resuming.** Closing the dialog never drops a held session. Reopening the transfer attaches to that same session, so there is no second attempt. The hash field stays mounted, keeping anything typed, through every status update while a send may have happened (`sending`, `submitted`, `unknown`, `unrelated`).
+- **Resuming.** The Flet tab keeps its own session when the dialog closes while a transfer is reserved. Reopening the dialog in that tab resumes the attempt. Another tab or browser sees its own wallet session and cannot clear the first tab's reservation. The hash field remains available while a send may have happened (`sending`, `submitted`, `unknown`, `unrelated`).
 - **A silent tab.** While the wallet shows its confirmation, the tab keeps polling. After five minutes without contact, `sending` becomes `unknown`. Rebound then asks the user to reject any pending request in the wallet and check its activity before releasing.
 - **Scope.** Reservations live in the memory of one Rebound server process. They cover every tab and browser served by that process. They do not survive a restart, are not shared between processes or workers, and do not cover the CLI or other wallets sending the same message. A competing send can still cost gas, but it cannot mint twice: Arc's nonce check makes the second one revert.
 - **Unknown outcome.** Any wallet error other than `4001`, or a missing hash, becomes `unknown`. Rebound never retries. The user can paste the hash from wallet activity to verify it, or release the transfer after confirming nothing was sent.
@@ -88,10 +88,10 @@ The wallet tab sends only what it claimed, and only if all of the following hold
 - no receipt means pending
 - the receipt must have the same transaction hash
 - `to` must be MessageTransmitterV2 and `from` must be the connected account
-- status `0x0` counts as this attempt's revert only if all of these hold. Otherwise the result is `unrelated` and the reservation stays:
-  - the block at the receipt's height has the receipt's block hash (canonical)
+- status `0x0` counts as this attempt's revert only if the claiming wallet adapter reported the hash and all of these checks hold. A pasted hash can prove successful delivery but cannot release a failed send.
+  - the RPC reports Arc Testnet, and the canonical block at the receipt's height includes the hash at the receipt's transaction index
   - the block is newer than the Arc head read at approval, so the receipt cannot belong to an earlier attempt
-  - `eth_getTransactionByHash` shows the same hash, from the approved account, to the transmitter, with exactly the approved calldata
+  - `eth_getTransactionByHash` agrees on the block and index and shows the same hash, approved sender, transmitter, zero value and exact approved calldata
 
 Delivery proof is main's exact-hash check, `RecoveryService.inspect_transaction(tx_hash, log_index=…, destination_hash=…)`. That call re-derives the original burn and Circle attestation and requires the Arc nonce to be consumed. It then runs `verify_arc_mint_receipt` on that exact hash:
 
