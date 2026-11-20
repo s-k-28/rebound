@@ -48,6 +48,8 @@ uv run python -m rebound.cli prepare "$BURN_TX_HASH" "$LOG_INDEX" --caller "$CAL
 
 Set those variables to your own public address, the original burn hash and the decimal `DepositForBurn` log index shown in the inbox. `prepare` exports an unsigned destination transaction only after fresh source/message/nonce checks and destination simulation. It does not send anything or request a key.
 
+The local MCP server exposes discovery, inspection, readiness and unsigned preparation to Codex and other MCP clients. [MCP setup](docs/MCP.md)
+
 Use **History options** in the browser or `--end-block` in the CLI to revisit a fixed source block window. The fixed range includes only burns in that window. Transfer status still reflects current chain state. When Circle supplies a destination transaction hash for a completed transfer, Rebound links to Arc after checking the successful receipt and its matching CCTP event.
 
 **Refresh this transfer** rechecks the selected source receipt, matching Circle message and Arc nonce without rerunning the wallet scan. **Copy evidence** copies the public transfer identifiers, amounts, verification time and receipt links for a support ticket or demo.
@@ -181,3 +183,5 @@ docker run --rm -p 8765:8765 --env-file .env -v rebound-data:/app/data rebound
 ```
 
 The container runs the web app as a non-root user. Keep signing keys out of it; local signing is intentionally separate.
+
+Deploy the same container to a public preview with the [Render blueprint](docs/DEPLOY.md).

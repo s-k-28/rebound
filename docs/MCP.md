@@ -39,6 +39,12 @@ agent restarts with only its wallet address
 
 Use the absolute path of your Rebound checkout. GUI apps may not inherit your shell `PATH`, so use the output of `which uv` as `command` if `uv` is not found.
 
+**Codex**
+
+```bash
+codex mcp add rebound -- uv run --directory /path/to/rebound python -m rebound.mcp
+```
+
 **Claude Code**
 
 ```bash

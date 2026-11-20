@@ -74,8 +74,8 @@ NEXT_STEPS = {
     "ready": ("prepare_recovery", "Call prepare_recovery with this tx_hash, log_index and the Arc "
               "address that will submit. A human or that address's own wallet must review and sign."),
     "caller_required": ("prepare_recovery_as_designated_caller", "Only the destination caller fixed "
-                        "in the message ({caller}) can submit. Call prepare_recovery with that caller; "
-                        "Rebound refuses any other address."),
+                        "in the message ({caller}) can submit. Prepare with that address if it is a "
+                        "wallet you control. For a contract caller, use the original app or its contract adapter."),
     "completed": ("none_already_minted", "Arc already consumed this nonce, so the USDC was minted. "
                   "Do not prepare, sign, mint or burn again."),
     "source_confirming": ("wait_then_inspect", "The burn needs 12 Base Sepolia confirmations. Call "
