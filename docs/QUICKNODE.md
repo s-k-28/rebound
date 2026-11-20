@@ -15,7 +15,7 @@ For local adapter checks, set `REBOUND_STREAM_SECRET` and send it in `x-rebound-
 
 The receiver stores event candidates in SQLite. Duplicate delivery does not create another recovery action. Canonical source receipt/block, the Circle message, destination nonce and actual caller are independently rechecked before preparation. Reorged or removed candidates cannot authorize a mint.
 
-Use **Search Stream index** in the inbox or `python -m rebound.cli stream-index WALLET` after delivery. This search reads candidates received through the webhook and verifies them with source receipts and destination chain state. It does not run a source `eth_getLogs` history scan. The inspector shows **Discovered via · Stream delivery** when the indexed event matches the delivered block hash. The coverage note applies even when no transfers are found.
+Use **Search Stream index** in the inbox or `uv run python -m rebound.cli stream-index "$WALLET"` after delivery. This search reads candidates received through the webhook and verifies them with source receipts and destination chain state. It does not run a source `eth_getLogs` history scan. The inspector shows **Discovered via · Stream delivery** when the indexed event matches the delivered block hash. The coverage note applies even when no transfers are found.
 
 Use Base Sepolia block `61175721` and wallet `0x395809d8da4a70145d5060448070a15367df722c` for a focused backfill check. The expected match is source log `4`. Check `/api/ready` for `stream_ingestion_configured` on the deployment receiving the webhook. [Controlled recovery evidence](LIVE-RECOVERY.md)
 
