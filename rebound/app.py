@@ -94,8 +94,8 @@ def create_app(recovery: RecoveryService | None = None, *, include_ui: bool = Tr
         return await checked(recovery.scan_stream(wallet))
 
     @api.get("/api/transactions/{tx_hash}")
-    async def transaction(tx_hash: str):
-        return await checked(recovery.inspect_transaction(tx_hash))
+    async def transaction(tx_hash: str, log_index: Annotated[int | None, Query(ge=0)] = None):
+        return await checked(recovery.inspect_transaction(tx_hash, log_index=log_index))
 
     @api.post("/api/streams")
     async def stream(request: Request, x_rebound_secret: Annotated[str | None, Header()] = None):

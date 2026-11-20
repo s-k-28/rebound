@@ -3,6 +3,7 @@
 import asyncio
 import os
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from urllib.parse import urlsplit
 
 import httpx
@@ -49,6 +50,13 @@ class SourceChanged(ValueError):
 
 class AmbiguousBurn(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class DestinationState:
+    status: str
+    block: int
+    nonce_used: bool
 
 
 EXPLANATIONS = {
@@ -196,12 +204,14 @@ class RecoveryService:
 
         return await _gather_reads(*(inspect(candidate) for candidate in burns[:100]))
 
-    async def inspect_transaction(self, tx_hash: str) -> dict:
+    async def inspect_transaction(self, tx_hash: str, *, log_index: int | None = None) -> dict:
         tx_hash = p.hash32(tx_hash)
         async with self._scan_slots:
             await self._verify_chain(self.base, 84532, p.MESSENGER)
             receipt_burns = await self._receipt_burns(tx_hash)
             burns = [burn for burn in receipt_burns if burn.destination_domain == 26]
+            if log_index is not None:
+                burns = [burn for burn in burns if burn.log_index == log_index]
             latest = quantity(await self.base.call("eth_blockNumber")) if burns else None
 
             async def inspect(burn: p.Burn) -> dict:
@@ -306,16 +316,17 @@ class RecoveryService:
             return f"{p.ARC_EXPLORER}/tx/{tx_hash}"
         return None
 
-    async def _message_state(self, message: p.Message, caller: str | None = None) -> str:
+    async def _message_state(self, message: p.Message, caller: str | None = None) -> DestinationState:
         await self._verify_chain(self.arc, 5042002, p.TRANSMITTER)
-        consumed, head = await asyncio.gather(
-            self.arc.call("eth_call", [{"to": p.TRANSMITTER, "data": p.used_nonce_calldata(message.nonce)}, "latest"]),
-            self.arc.call("eth_blockNumber"),
-        )
+        block = quantity(await self.arc.call("eth_blockNumber"))
+        consumed = await self.arc.call("eth_call", [
+            {"to": p.TRANSMITTER, "data": p.used_nonce_calldata(message.nonce)}, hex(block),
+        ])
         used = quantity(consumed)
         if used not in (0, 1):
             raise UpstreamError("Arc returned an unrecognized nonce state.")
-        return p.classify(message, nonce_used=bool(used), destination_block=quantity(head), caller=caller)
+        return DestinationState(p.classify(message, nonce_used=bool(used), destination_block=block, caller=caller),
+                                block, bool(used))
 
     async def diagnose(self, burn: p.Burn, *, source_head: int | None = None, caller: str | None = None,
                        receipt_burns: list[p.Burn] | None = None) -> dict:
@@ -326,12 +337,15 @@ class RecoveryService:
             "caller": burn.caller, "nonce": None, "fee": None, "example": False,
             "source_url": f"https://sepolia.basescan.org/tx/{burn.tx_hash}",
             "destination_url": None,
+            "source_verified": False, "attestation_matched": False,
+            "destination_block": None, "nonce_used": None, "expiration_block": None,
         }
         try:
             if receipt_burns is None:
                 await self._receipt_burn(burn.tx_hash, burn.log_index, burn)
             else:
                 self._match_receipt_burn(receipt_burns, burn.log_index, burn)
+            row["source_verified"] = True
             if burn.destination_domain != 26:
                 raise ValueError("Unsupported destination route.")
             attested = await self._matched_attestation(burn)
@@ -339,8 +353,11 @@ class RecoveryService:
                 status = "awaiting_attestation"
             else:
                 message, raw, _, receipt_hint = attested
-                row.update(nonce=message.nonce, fee=p.usdc(message.fee), net_amount=p.usdc(message.amount - message.fee))
-                status = await self._message_state(message, caller)
+                row.update(nonce=message.nonce, fee=p.usdc(message.fee), net_amount=p.usdc(message.amount - message.fee),
+                           attestation_matched=True, expiration_block=message.expires_at)
+                destination = await self._message_state(message, caller)
+                row.update(destination_block=destination.block, nonce_used=destination.nonce_used)
+                status = destination.status
                 if status == "completed":
                     row["destination_url"] = await self._destination_receipt_url(receipt_hint, raw, message)
                 if status == "ready":
@@ -355,6 +372,7 @@ class RecoveryService:
             row.update(status="unavailable", explanation=EXPLANATIONS["unavailable"])
         except ValueError:
             row.update(status="unsupported", explanation=EXPLANATIONS["unsupported"])
+        row["checked_at"] = datetime.now(UTC).isoformat(timespec="seconds")
         return row
 
     async def prepare(self, tx_hash: str, log_index: int, caller: str) -> dict:
@@ -370,7 +388,7 @@ class RecoveryService:
         if attested is None:
             raise ValueError("Transfer is awaiting_attestation. Refresh later.")
         message, raw, attestation, _ = attested
-        status = await self._message_state(message, caller)
+        status = (await self._message_state(message, caller)).status
         if status != "ready":
             raise ValueError(f"Transfer is {status}. {EXPLANATIONS[status]}")
         transaction = {

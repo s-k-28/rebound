@@ -1,6 +1,6 @@
 # Rebound
 
-An address-first inbox for interrupted USDC transfers. Enter a public wallet address, discover supported burns, inspect their real state and prepare completion to the recipient already encoded in the original transfer.
+Rebound finds interrupted USDC transfers from a public wallet address. It checks the source receipt, matches Circle’s message and reads Arc’s nonce state so users can decide whether to wait or finish the existing transfer.
 
 **Initial route: Base Sepolia → Arc Testnet.** This is a testnet prototype, with a Python/Flet browser interface, a FastAPI backend and a local Python recovery command. Browser wallet signing, public hosting and a recorded end-to-end testnet recovery remain separate release gates. Example transfers are synthetic and labeled; they are never claimable funds.
 
@@ -45,6 +45,8 @@ Set those variables to your own public address, the original burn hash and the d
 
 Use **History options** in the browser or `--end-block` in the CLI to revisit a fixed source block window. The fixed range includes only burns in that window. Transfer status still reflects current chain state. When Circle supplies a destination transaction hash for a completed transfer, Rebound links to Arc after checking the successful receipt and its matching CCTP event.
 
+**Refresh this transfer** rechecks the selected source receipt, matching Circle message and Arc nonce without rerunning the wallet scan. **Copy evidence** copies the public transfer identifiers, amounts, verification time and receipt links for a support ticket or demo.
+
 ### Complete a transfer locally
 
 For an eligible **testnet** transfer, use a throwaway testnet account with destination gas:
@@ -65,7 +67,7 @@ The private key is never accepted by a web endpoint, written to a file or printe
 | Awaiting attestation | Circle has not returned a usable signed message yet; do not burn again |
 | Ready | Current checks allow preparation; select the actual caller and revalidate |
 | Caller required | The message restricts who can call the destination contract; the recipient is not automatically authorized |
-| Expired | The existing burn needs a refreshed attestation; [follow Circle's procedure](https://developers.circle.com/cctp/howtos/troubleshoot-transfers) |
+| Expired | The existing burn needs a refreshed attestation. [Circle's re-attestation procedure](https://developers.circle.com/cctp/references/technical-guide#message-body) |
 | Completed | Destination nonce is already consumed; another mint is unnecessary |
 | Source changed | Source evidence no longer matches the canonical receipt/block; inspect rather than sending |
 | Unsupported | The route, message, hook or adapter is outside this version's coverage |
@@ -99,6 +101,15 @@ Local Python CLI ────┘          │          ├─ Circle sandbox att
 | Attestation service | `https://iris-api-sandbox.circle.com` |
 
 These are existing Circle contracts; Rebound has not deployed a new protocol. See the [canonical addresses](https://developers.circle.com/cctp/references/contract-addresses) and [message source](https://github.com/circlefin/evm-cctp-contracts/tree/master/src/messages/v2). Network IDs and deployed bytecode are checked before use. CCTP itself enforces one successful mint per nonce; Rebound does not invent that guarantee. Racing or reverted transactions can still consume gas.
+
+### Economic design and risks
+
+- **Original principal.** Circle’s contracts burn the original USDC on Base Sepolia and mint on Arc to the recipient already encoded in the message. Rebound holds no balance and takes no fee.
+- **Costs.** Circle’s protocol fee comes out of the original amount and is bounded by the source burn’s maximum fee. The destination caller pays Arc gas in testnet USDC. The local recovery command prints a separate gas estimate and applies a caller-selected cap.
+- **Settlement.** Arc’s consumed nonce prevents another mint of the same message. Competing submissions can spend gas even when only one mint succeeds. Rebound checks the nonce again immediately before preparing a signed recovery.
+- **Dependencies.** The flow depends on a canonical confirmed source receipt, Circle’s valid attestation, current Arc chain state and a funded authorized caller. The app bounds discovery to the displayed coverage and checks the original destination caller before simulation.
+
+**UBC track fit.** DeFi and Onchain Applications with Best Use of Arc is the planned entry. The organizer’s guide includes CCTP cross-chain flows in DeFi and allows existing Arc contracts. QuickNode Streams requires a configured live source and destination. [Official hackathon guide](https://docs.google.com/document/d/1QaySCo7u3VxMVNdk3C5Ab3ewc2E46AuLntti-Uzx5EY/edit)
 
 ## Checks
 

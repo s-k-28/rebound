@@ -139,6 +139,6 @@ Source RPC, destination RPC and Circle sandbox endpoints are operator configurat
 
 ## 12. Event constraints and open risks
 
-UBC deadline: November 20, 2026, noon CST. One main track only; initial intended track Consumer with Arc. Bounties are conditional on actual integration. The event's age-of-majority restriction remains unresolved for this 11th-grade participant, and prizes require in-person attendance November 21. Registration does not prove eligibility. These questions do not block authorized local development but do affect submission/prize claims.
+UBC submissions close November 20, 2026 at noon CST. The planned entry is DeFi and Onchain Applications with Best Use of Arc. The official guide lists CCTP cross-chain flows under DeFi and requires a README explaining economic design, risks and contract addresses. The QuickNode bounty requires a configured Stream with a filter and destination. Devpost lists an age-of-majority requirement and the event requires in-person attendance on November 21 to qualify for prizes. [Hackathon guide](https://docs.google.com/document/d/1QaySCo7u3VxMVNdk3C5Ab3ewc2E46AuLntti-Uzx5EY/edit) · [Devpost](https://ubc-hackathon-2026.devpost.com/)
 
 Largest product risks: competing recovery tooling, episodic use, incomplete historical coverage and unvalidated demand. Largest implementation risks: provider history limits, attestation outages, wrong transfer/message association, restricted callers and browser signing compatibility. No guaranteed-win or universal-recovery claim is permitted.

@@ -189,6 +189,8 @@ class InboxUI:
         )
         self.review_error = ""
         self.preparing = False
+        self.refreshing = False
+        self.refresh_error = ""
         self.root = ft.Row(expand=True, spacing=0, vertical_alignment=ft.CrossAxisAlignment.STRETCH)
         self.search_input = ft.TextField(hint_text="Search transfers", prefix_icon=ft.Icons.SEARCH_ROUNDED,
             text_size=12, height=40, width=210, filled=True, fill_color="#F4F6F3",
@@ -545,6 +547,10 @@ class InboxUI:
         steps = [("Source burn", item["status"] not in {"source_changed", "unavailable", "source_confirming"}),
                  ("Circle attestation", item["status"] in {"ready", "completed", "caller_required", "expired", "submitted"}),
                  ("Destination mint", item["status"] == "completed")]
+        if not item.get("example"):
+            steps = [("Canonical source receipt", item.get("source_verified")),
+                     ("Circle message matches burn", item.get("attestation_matched")),
+                     ("Arc nonce consumed", item.get("nonce_used") is True)]
         path = ft.Column([ft.Row([ft.Icon(ft.Icons.CHECK_CIRCLE_ROUNDED if done else ft.Icons.RADIO_BUTTON_UNCHECKED_ROUNDED,
             size=17, color=BLUE if done else "#B4C1B6"), self.text(label, 12, INK if done else MUTED)], spacing=10)
             for label, done in steps], spacing=16)
@@ -555,6 +561,13 @@ class InboxUI:
             discovery = {"stream": "Stream delivery", "rpc": "Source RPC history",
                          "receipt": "Base Sepolia receipt"}[item["discovery_source"]]
             values.append(self.value_line("Discovered via", discovery))
+        if item.get("checked_at"):
+            values.append(self.value_line("Source event", f"Block {item['block_number']:,} · log {item['log_index']}"))
+        if item.get("destination_block") is not None:
+            nonce_status = "Consumed" if item["nonce_used"] else "Unused"
+            values.append(self.value_line("Arc nonce check", f"{nonce_status} at block {item['destination_block']:,}"))
+        if item.get("expiration_block"):
+            values.append(self.value_line("Attestation expires", f"Arc block {item['expiration_block']:,}"))
         controls = [header, ft.Container(ft.Column([
             self.text(item.get("explanation") or description, 12, MUTED), path,
             ft.Divider(color=LINE), *values,
@@ -564,15 +577,21 @@ class InboxUI:
         if destination_url:
             controls.insert(2, ft.Container(ft.TextButton("Open verified Arc receipt", url=destination_url,
                 icon=ft.Icons.OPEN_IN_NEW_ROUNDED), padding=ft.Padding.only(left=12, bottom=10)))
-        evidence = ft.ExpansionTile(title=self.text("Transfer evidence", 12, INK, ft.FontWeight.W_600),
-            controls=[ft.Container(ft.Column([
+        evidence_controls = [
                 self.value_line("Source transaction", item["tx_hash"], selectable=True),
-                self.value_line("Block / log", f"{item['block_number']:,} / {item['log_index']}"),
                 self.value_line("Destination caller", "Any caller" if item.get("caller") == ZERO else item.get("caller", "Unknown"), selectable=True),
                 self.value_line("Message nonce", item.get("nonce") or "Not available yet", selectable=True),
                 ft.TextButton("Open source receipt", icon=ft.Icons.OPEN_IN_NEW_ROUNDED, url=item.get("source_url"),
                               disabled=self.state.example or not item.get("source_url")),
-            ], spacing=16), padding=ft.Padding.symmetric(horizontal=18, vertical=12))],
+        ]
+        if item.get("checked_at"):
+            evidence_controls.extend([
+                self.value_line("Checked at (UTC)", item["checked_at"].replace("T", " ").removesuffix("+00:00")),
+                ft.TextButton("Copy evidence", icon=ft.Icons.CONTENT_COPY_ROUNDED, on_click=self.copy_evidence),
+            ])
+        evidence = ft.ExpansionTile(title=self.text("Transfer evidence", 12, INK, ft.FontWeight.W_600),
+            controls=[ft.Container(ft.Column(evidence_controls, spacing=16),
+                        padding=ft.Padding.symmetric(horizontal=18, vertical=12))],
             collapsed_bgcolor="#FAFBF9", bgcolor="#FFFFFF", tile_padding=ft.Padding.symmetric(horizontal=20, vertical=4))
         controls.append(evidence)
         self.review_host.content = self.transaction_review(self.state.prepared) if self.state.prepared else None
@@ -580,6 +599,31 @@ class InboxUI:
         controls.append(self.review_host)
         return ft.Container(ft.Column(controls, spacing=0), bgcolor="#FFFFFF", border=ft.Border.all(1, LINE),
                             border_radius=13, clip_behavior=ft.ClipBehavior.ANTI_ALIAS)
+
+    async def copy_evidence(self, _=None) -> None:
+        item = self.state.selected
+        if not item or self.state.example or not item.get("checked_at"):
+            return
+        fields = [
+            "Rebound · Base Sepolia → Arc Testnet",
+            f"Checked at {item['checked_at']}",
+            f"Status: {state_copy(item['status'])[0]}",
+            f"Source transaction: {item['tx_hash']}",
+            f"Source block: {item['block_number']} · log {item['log_index']}",
+            f"Source receipt: {item['source_url']}",
+            f"Fixed recipient: {item['recipient']}",
+            f"Burn amount: {item['amount']} USDC",
+        ]
+        if item.get("nonce"):
+            fields.extend([f"CCTP nonce: {item['nonce']}", f"Protocol fee: {item['fee']} USDC",
+                           f"Destination amount: {item['net_amount']} USDC"])
+        if item.get("destination_block") is not None:
+            nonce_status = "consumed" if item["nonce_used"] else "unused"
+            fields.append(f"Arc nonce {nonce_status} at block {item['destination_block']}")
+        if item.get("destination_url"):
+            fields.append(f"Verified Arc receipt: {item['destination_url']}")
+        await self.clipboard.set("\n".join(fields))
+        self.page.show_dialog(ft.SnackBar(content=self.text("Transfer evidence copied", color="#FFFFFF")))
 
     def search(self, _=None):
         self.state.query = self.search_input.value or ""
@@ -622,7 +666,7 @@ class InboxUI:
                 self.text("Review a destination mint using the address that will actually sign it.", 14, MUTED),
                 self.caller_input,
                 self.button("Checking recovery…" if self.preparing else "Review recovery", self.prepare,
-                            primary=True, disabled=self.preparing, icon=ft.Icons.FACT_CHECK_OUTLINED),
+                            primary=True, disabled=self.preparing or self.refreshing, icon=ft.Icons.FACT_CHECK_OUTLINED),
                 self.text("No signing happens in this page. Keep private keys out of your browser.", 12, MUTED),
             ])
             if self.review_error:
@@ -630,8 +674,13 @@ class InboxUI:
         else:
             controls.append(self.text(description, 14, MUTED))
             if item["status"] == "expired":
-                controls.append(ft.TextButton("Circle re-attestation guide", url="https://developers.circle.com/cctp/howtos/troubleshoot-transfers", icon=ft.Icons.OPEN_IN_NEW_ROUNDED))
-            controls.append(self.button("Refresh live state", self.refresh_scan, icon=ft.Icons.REFRESH_ROUNDED))
+                controls.append(ft.TextButton("Circle re-attestation guide", url="https://developers.circle.com/cctp/references/technical-guide#message-body", icon=ft.Icons.OPEN_IN_NEW_ROUNDED))
+        if not self.state.example:
+            controls.append(self.button("Checking transfer…" if self.refreshing else "Refresh this transfer",
+                            self.refresh_transfer, disabled=self.refreshing or self.preparing or self.state.busy,
+                            icon=ft.Icons.REFRESH_ROUNDED))
+            if self.refresh_error:
+                controls.append(self.text(self.refresh_error, 13, "#AE3434"))
         return ft.Container(ft.Column(controls, spacing=16,
                             horizontal_alignment=ft.CrossAxisAlignment.STRETCH), padding=22,
                             border=ft.Border(top=ft.BorderSide(1, LINE)))
@@ -694,15 +743,33 @@ class InboxUI:
     async def inspect_transaction(self, _=None) -> None:
         await self.scan(mode="transaction")
 
-    async def refresh_scan(self, _=None) -> None:
-        if self.state.busy or self.state.selected is None:
+    async def refresh_transfer(self, _=None) -> None:
+        state, item = self.state, self.state.selected
+        if state.busy or state.example or item is None or self.refreshing or self.preparing:
             return
-        self.show_transaction = self.state.mode == "transaction"
-        if self.show_transaction:
-            self.tx_input.value = self.state.selected["tx_hash"]
-        else:
-            self.wallet_input.value = self.state.wallet
-        await self.scan(mode=self.state.mode)
+        self.refreshing = True
+        self.refresh_error = ""
+        state.prepared = None
+        self.render()
+        try:
+            result = await self.service.inspect_transaction(item["tx_hash"], log_index=item["log_index"])
+            transfers = result["transfers"]
+            if len(transfers) != 1 or transfers[0]["key"] != item["key"]:
+                raise ValueError("The original supported burn was not found in its current source receipt.")
+            if self.state is state and state.selected is item:
+                fresh = transfers[0] | {"discovery_source": item.get("discovery_source", "receipt")}
+                state.transfers = [fresh if row["key"] == item["key"] else row for row in state.transfers]
+                state.selected = fresh
+                # Keep the updated transfer visible after a state change.
+                if fresh not in state.visible_transfers():
+                    state.filter = "all"
+                    state.query = ""
+        except Exception as exc:
+            if self.state is state and state.selected is item:
+                self.refresh_error = f"Refresh failed. Showing the previous result. {safe_error(exc)}"
+        finally:
+            self.refreshing = False
+            self.render()
 
     def toggle_transaction(self, _=None) -> None:
         self.show_transaction = not self.show_transaction
@@ -730,6 +797,7 @@ class InboxUI:
         self.state.prepared = None
         self.caller_input.value = ""
         self.review_error = ""
+        self.refresh_error = ""
         self.render()
 
     def back(self, _=None) -> None:
@@ -745,7 +813,7 @@ class InboxUI:
             self.review_host.update()
 
     async def prepare(self, _=None) -> None:
-        if self.preparing or self.state.selected is None:
+        if self.preparing or self.refreshing or self.state.selected is None:
             return
         state, transfer = self.state, self.state.selected
         caller = self.caller_input.value or ""

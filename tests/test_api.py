@@ -42,16 +42,22 @@ async def test_prepare_failure_is_client_actionable_without_provider_secret(setu
 
 async def test_transaction_lookup_reuses_canonical_receipt_without_a_history_scan(setup_service):
     from rebound.app import create_app
+    from tests.test_protocol import burn_log
 
     service, state = setup_service
     state["rpc_error"] = True
+    state["logs"].append(burn_log(amount=10_000_000) | {"logIndex": "0x4"})
     app = create_app(service, include_ui=False)
     url = "/api/transactions/0x" + "cd" * 32
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        result = await client.get(url)
+        result = await client.get(url, params={"log_index": 3})
         assert result.status_code == 200
         rows = result.json()["transfers"]
         assert [(row["log_index"], row["discovery_source"], row["status"]) for row in rows] == [(3, "receipt", "ready")]
+        assert rows[0]["source_verified"] and rows[0]["attestation_matched"]
+        assert rows[0]["nonce_used"] is False and rows[0]["destination_block"] == 900
+        assert rows[0]["expiration_block"] == 1000
+        assert (await client.get(url, params={"log_index": 99})).json()["transfers"] == []
         state["logs"] = []
         assert (await client.get(url)).json()["transfers"] == []
         state["canonical"] = False

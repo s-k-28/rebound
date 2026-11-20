@@ -44,6 +44,28 @@ async def test_pending_review_is_discarded_after_switching_transfers(monkeypatch
     assert not app.preparing
 
 
+async def test_refresh_keeps_selected_transfer_visible_after_completion(monkeypatch):
+    original = {"key": "one", "tx_hash": "0x" + "aa" * 32, "log_index": 4,
+                "status": "ready", "discovery_source": "stream"}
+    other = {"key": "two", "status": "awaiting_attestation"}
+
+    class RefreshService:
+        async def inspect_transaction(self, tx_hash, *, log_index):
+            assert (tx_hash, log_index) == (original["tx_hash"], 4)
+            return {"transfers": [original | {"status": "completed", "discovery_source": "receipt"}]}
+
+    app = ui.InboxUI(object(), RefreshService())
+    monkeypatch.setattr(app, "render", lambda: None)
+    app.state.transfers = [original, other]
+    app.state.selected = original
+    app.state.filter = "attention"
+    app.state.prepared = {"stale": True}
+    await app.refresh_transfer()
+    assert app.state.selected == original | {"status": "completed"}
+    assert app.state.visible_transfers() == [app.state.selected, other]
+    assert app.state.prepared is None
+
+
 def test_attention_filter_excludes_completed_but_preserves_waiting():
     state = ui.InboxState()
     state.load_examples()
