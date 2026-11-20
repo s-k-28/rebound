@@ -68,8 +68,9 @@ def display_amount(value: str | None) -> str:
 
 def aligned_amounts(*values: str | None) -> list[str | None]:
     """Give related USDC amounts one shared precision so they align on the decimal point."""
-    present = [Decimal(value) for value in values if value is not None]
-    places = max([2] + [-min(0, number.normalize().as_tuple().exponent) for number in present])
+    # Read the exact decimal strings; Decimal.normalize() rounds large USDC coefficients.
+    places = max([2] + [len(value.partition(".")[2].rstrip("0"))
+                        for value in values if value is not None])
     places = min(places, 6)
     return [None if value is None else f"{Decimal(value):,.{places}f}" for value in values]
 
@@ -660,8 +661,14 @@ class InboxUI:
             mint.append(self.proof_link("Open submitted Arc receipt", submitted_url))
         steps = proof_steps(item)
         details = [burn, attestation, mint]
-        return ft.Column([self.proof_step(index + 1, title, state, tone, details[index], last=index == 2)
-                          for index, (title, state, tone) in enumerate(steps)], spacing=0)
+        controls = [self.proof_step(index + 1, title, state, tone, details[index], last=index == 2)
+                    for index, (title, state, tone) in enumerate(steps)]
+        if not live:
+            controls.insert(0, ft.Container(self.text(
+                "SIMULATED PROOF · Example wallet",
+                12, AMBER, ft.FontWeight.W_700), bgcolor=AMBER_WASH, padding=12,
+                margin=ft.Margin.only(bottom=16)))
+        return ft.Column(controls, spacing=0)
 
     def proof_link(self, label, url):
         return ft.Row([self.link(label, url=url, icon=ft.Icons.OPEN_IN_NEW, flush=True)])
@@ -791,7 +798,7 @@ class InboxUI:
             fields.append("Check downstream app actions separately from the CCTP mint.")
         if item.get("destination_block") is not None:
             nonce_status = "consumed" if item["nonce_used"] else "unused"
-            fields.append(f"Arc nonce {nonce_status} at block {item['destination_block']}")
+            fields.append(f"Arc nonce {nonce_status} as of block {item['destination_block']}")
         if item.get("destination_url"):
             fields.append(f"Verified Arc receipt: {item['destination_url']}")
         submitted_url = self.submitted_receipt_url(item)
