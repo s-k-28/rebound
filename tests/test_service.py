@@ -42,7 +42,8 @@ def setup_service(tmp_path):
             case "eth_blockNumber":
                 result = hex(900 if dest else state.get("base_head", 200))
             case "eth_getBlockByNumber":
-                result = {"hash": "0x" + ("ef" if state["canonical"] else "aa") * 32}
+                result = {"hash": "0x" + ("ef" if state["canonical"] else "aa") * 32,
+                          "number": "0x64", "transactions": ["0x" + "cd" * 32]}
             case "eth_getLogs":
                 from rebound.protocol import BURN_TOPIC, MESSENGER, USDC
                 assert params[0]["topics"] == [BURN_TOPIC, "0x" + "00" * 12 + USDC[2:]]
@@ -51,7 +52,7 @@ def setup_service(tmp_path):
                 result = state["logs"]
             case "eth_getTransactionReceipt":
                 result = {"status": "0x1", "blockNumber": "0x64", "blockHash": "0x" + "ef" * 32,
-                          "transactionHash": "0x" + "cd" * 32, "logs": state["logs"]}
+                          "transactionHash": "0x" + "cd" * 32, "transactionIndex": "0x0", "logs": state["logs"]}
             case "eth_call":
                 data = params[0]["data"]
                 result = "0x" + (int(state["used"]) if not data.startswith("0x57ecfd28") else state.get("simulation", 1)).to_bytes(32, "big").hex()
@@ -101,6 +102,80 @@ async def test_source_reorg_never_becomes_ready(setup_service):
     state["canonical"] = False
     result = await app.scan(WALLET, blocks=150)
     assert result["transfers"][0]["status"] == "source_changed"
+
+
+@pytest.mark.parametrize("target, patch", [
+    ("block", {"number": "0x65"}),
+    ("block", {"number": None}),
+    ("block", {"transactions": []}),
+    ("block", {"transactions": None}),
+    ("block", {"transactions": ["0x" + "12" * 32, "0x" + "cd" * 32]}),
+    ("block", {"transactions": ["provider-private-invalid-hash"]}),
+    ("receipt", {"transactionIndex": None}),
+    ("receipt", {"transactionIndex": "0x1"}),
+    ("receipt", {"transactionIndex": "provider-private-invalid-index"}),
+    ("receipt", {"blockNumber": None}),
+    ("log", {"transactionIndex": "0x1"}),
+    ("log", {"transactionIndex": None}),
+])
+async def test_source_receipt_identity_failures_are_typed_and_never_ready(setup_service, target, patch):
+    app, state = setup_service
+    if target == "log":
+        state["logs"] = [state["logs"][0] | patch]
+    original = app.base.call
+
+    async def changed_source(method, params=None):
+        result = await original(method, params)
+        if target == "block" and method == "eth_getBlockByNumber":
+            return result | patch
+        if target == "receipt" and method == "eth_getTransactionReceipt":
+            return result | patch
+        return result
+
+    app.base.call = changed_source
+    row, = (await app.scan(WALLET, blocks=150))["transfers"]
+    assert row["status"] == "source_changed" and row["source_verified"] is False
+    assert "provider-private" not in row["explanation"]
+    with pytest.raises(service.SourceChanged) as error:
+        await app.inspect_transaction("0x" + "cd" * 32, log_index=3)
+    assert "provider-private" not in str(error.value)
+    with pytest.raises(service.SourceChanged):
+        await app.prepare("0x" + "cd" * 32, 3, WALLET)
+
+
+@pytest.mark.parametrize("include_event_index", [False, True])
+async def test_source_receipt_accepts_exact_nonzero_transaction_position(setup_service, include_event_index):
+    app, state = setup_service
+    if include_event_index:
+        state["logs"] = [state["logs"][0] | {"transactionIndex": "0x1"}]
+    original = app.base.call
+
+    async def indexed_source(method, params=None):
+        result = await original(method, params)
+        if method == "eth_getBlockByNumber":
+            assert params == ["0x64", False]
+            return result | {"transactions": ["0x" + "12" * 32, "0x" + "cd" * 32]}
+        if method == "eth_getTransactionReceipt":
+            return result | {"transactionIndex": "0x1"}
+        return result
+
+    app.base.call = indexed_source
+    row, = (await app.scan(WALLET, blocks=150))["transfers"]
+    assert row["status"] == "ready" and row["source_verified"] is True
+
+
+async def test_source_block_outage_remains_unavailable(setup_service):
+    app, _ = setup_service
+    original = app.base.call
+
+    async def unavailable_block(method, params=None):
+        if method == "eth_getBlockByNumber":
+            raise UpstreamError("Base Sepolia is unavailable.")
+        return await original(method, params)
+
+    app.base.call = unavailable_block
+    row, = (await app.scan(WALLET, blocks=150))["transfers"]
+    assert row["status"] == "unavailable"
 
 
 async def test_rpc_failure_is_not_a_successful_empty_inbox(setup_service):

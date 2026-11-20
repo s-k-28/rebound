@@ -371,16 +371,31 @@ class RecoveryService:
     async def _receipt_burns(self, tx_hash: str) -> list[p.Burn]:
         tx_hash = p.hash32(tx_hash)
         receipt = await self.base.call("eth_getTransactionReceipt", [tx_hash])
+
+        def source_quantity(value) -> int:
+            # Numeric parsing errors describe malformed evidence. Actual RPC
+            # outages still propagate as UpstreamError, rather than a reorg.
+            try:
+                return quantity(value)
+            except UpstreamError as exc:
+                raise SourceChanged("The source receipt could not be matched safely.") from exc
+
         try:
             if not isinstance(receipt, dict) or receipt.get("status") != "0x1":
                 raise SourceChanged("Source burn receipt is missing or unsuccessful.")
             if p.hash32(receipt["transactionHash"]) != tx_hash:
                 raise SourceChanged("Source receipt does not identify the expected transaction.")
-            block_number = quantity(receipt["blockNumber"])
+            block_number = source_quantity(receipt["blockNumber"])
             block_hash = p.hash32(receipt["blockHash"])
+            transaction_index = source_quantity(receipt["transactionIndex"])
             block = await self.base.call("eth_getBlockByNumber", [hex(block_number), False])
-            if not isinstance(block, dict) or block.get("hash", "").lower() != block_hash:
+            if (not isinstance(block, dict) or p.hash32(block.get("hash")) != block_hash
+                    or source_quantity(block.get("number")) != block_number):
                 raise SourceChanged("Source burn is no longer in its canonical block.")
+            transactions = block.get("transactions")
+            if (not isinstance(transactions, list) or transaction_index >= len(transactions)
+                    or p.hash32(transactions[transaction_index]) != tx_hash):
+                raise SourceChanged("Source transaction is not at its canonical block position.")
             logs = receipt["logs"]
             if not isinstance(logs, list):
                 raise ValueError("Invalid receipt logs.")
@@ -394,6 +409,8 @@ class RecoveryService:
                     continue
                 if candidate.tx_hash != tx_hash or candidate.block_number != block_number or candidate.block_hash != block_hash:
                     raise SourceChanged("Burn event identity does not match its receipt.")
+                if "transactionIndex" in log and source_quantity(log["transactionIndex"]) != transaction_index:
+                    raise SourceChanged("Burn event transaction position does not match its receipt.")
                 burns.append(candidate)
             return burns
         except (KeyError, TypeError, AttributeError, ValueError) as exc:
