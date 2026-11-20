@@ -19,3 +19,9 @@ Tests cover original-recipient and amount binding, message versions, caller rest
 Review found and fixed two edge cases: default Decimal precision could round large uint256 display amounts, and economically identical burns within one source transaction could be assigned the same available attestation. Amount formatting now uses integer arithmetic. Ambiguous source burns are unsupported until exact source-message association is implemented.
 
 The current test count and last verification commands are reported with the final code update; they are intentionally not frozen into this document while the UI is being revised.
+
+## Runtime checks and limits
+
+The Python/Flet app was opened in Chrome and its actual rendering inspected at desktop and 390px widths. Browser checks caught an invalid expanded control inside a wrapping layout and search losing keyboard focus; both were fixed. The corrected workspace renders the scan form and inbox properly. Example selection, completed-status filtering, sequential multi-character search and clearing a hidden inspector were exercised against the running app. Search retained focus between separate `4` and `2` keystrokes and correctly showed only the 42-USDC example. These checks complement the **70 passing automated tests** and clean Ruff and diff checks.
+
+Container instructions and a non-root Dockerfile are provided. The local Docker daemon was unavailable, so the image was not built or run in this session. The Python app itself was started and tested directly with Uvicorn.

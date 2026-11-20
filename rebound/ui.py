@@ -24,7 +24,7 @@ STATE_COPY = {
     "awaiting_attestation": ("Waiting for Circle", "Your source transfer was found. Wait for Circle's attestation, then scan again.", AMBER, ft.Icons.SCHEDULE_ROUNDED),
     "source_confirming": ("Source confirming", "The source transfer needs more confirmations before recovery can be prepared.", AMBER, ft.Icons.SCHEDULE_ROUNDED),
     "completed": ("Completed", "The destination has already consumed this message's nonce. Do not send the transfer again.", GREEN, ft.Icons.CHECK_CIRCLE_ROUNDED),
-    "caller_required": ("Specific caller required", "Only the destination caller named in the original transfer can deliver this message. The recipient cannot change that rule.", AMBER, ft.Icons.LOCK_OUTLINE_ROUNDED),
+    "caller_required": ("Caller required", "Only the destination caller named in the original transfer can deliver this message. The recipient cannot change that rule.", AMBER, ft.Icons.LOCK_OUTLINE_ROUNDED),
     "expired": ("Attestation expired", "The original burn still exists. It needs a fresh Circle attestation before it can be completed.", AMBER, ft.Icons.UPDATE_ROUNDED),
     "unsupported": ("Outside current support", "Rebound cannot safely prepare this transfer with the current route and message support.", MUTED, ft.Icons.INFO_OUTLINE_ROUNDED),
     "unavailable": ("Could not verify", "A network or data source is unavailable. Try again before taking any action.", MUTED, ft.Icons.CLOUD_OFF_OUTLINED),
