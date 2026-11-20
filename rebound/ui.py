@@ -644,8 +644,9 @@ class InboxUI:
             attestation.append(line(f"Expires at Arc block {item['expiration_block']:,}"))
         mint = []
         if item.get("destination_block") is not None:
-            nonce_status = "consumed" if item["nonce_used"] else "unused"
-            mint.append(line(f"Nonce {nonce_status} at Arc block {item['destination_block']:,}"))
+            # destination_block is when Rebound read the nonce, not when the mint happened.
+            nonce_status = "used" if item["nonce_used"] else "unused"
+            mint.append(line(f"Nonce {nonce_status}, read at Arc block {item['destination_block']:,}"))
         destination_url = item.get("destination_url") if live else None
         if destination_url:
             mint.append(self.proof_link("Open verified Arc receipt", destination_url))
