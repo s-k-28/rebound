@@ -98,6 +98,8 @@ Use this sequence to show Stream-index discovery and its evidence limits. Public
 
 If the label reads **Shared-secret adapter payload** or **Simulated Stream delivery**, present it as an endpoint test or synthetic example. **Authenticated Stream payload** also does not by itself establish provider origin. Preserve the distinction between the recorded QuickNode **Send Payload** setup test, the local signed replay of the controlled burn and independently observed delivery from an actual Stream.
 
+For a fresh shared-secret demonstration, follow the [isolated local setup](QUICKNODE.md#showing-the-integration-without-a-live-delivery). A reused authenticated record keeps its authentication label; a legacy **Stream endpoint record** has no stored receipt time or HMAC evidence. Neither proves provider delivery.
+
 ## Final sign-off checklist
 
 The first five checks were verified in the [controlled testnet run](LIVE-RECOVERY.md).

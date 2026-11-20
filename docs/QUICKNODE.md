@@ -46,7 +46,25 @@ A user who lost their session may have an address and no transaction hash. RPC d
 
 ## Showing the integration without a live delivery
 
-A recording does not need a live Stream. Start the app with `REBOUND_STREAM_SECRET` set and run `REBOUND_STREAM_SECRET=... uv run python scripts/seed_demo_delivery.py`. It delivers the documented controlled burn through the real `/api/streams` endpoint with the shared secret. The walkthrough wallet then finds it from the address alone, and the app labels the delivery **Shared-secret adapter payload** and states that provider delivery is unverified, because it is an endpoint test and not a QuickNode delivery. Say so in the recording. Never describe it as live.
+A recording can demonstrate the endpoint adapter without a live Stream. Use a fresh isolated local database for the expected label. In both terminals, have the same `REBOUND_STREAM_SECRET` already exported through your normal secret-management setup; do not put its value in a command, recording or public app. Unset `REBOUND_STREAM_SECURITY_TOKEN` for this shared-secret test, because a configured HMAC token takes precedence.
+
+Start a separate local instance in terminal one:
+
+```sh
+env -u REBOUND_STREAM_SECURITY_TOKEN \
+  REBOUND_DB="$(mktemp -d)/rebound.sqlite3" \
+  uv run --locked uvicorn rebound.app:app --host 127.0.0.1 --port 8766
+```
+
+In terminal two, from the repository root with the existing shared secret in its environment:
+
+```sh
+uv run --locked python scripts/seed_demo_delivery.py http://127.0.0.1:8766
+```
+
+The helper reads the public receipt for the documented controlled burn and submits its log to this instance's `/api/streams` endpoint. Search the Stream index using the public walkthrough wallet. A fresh unsigned endpoint record is labelled **Shared-secret adapter payload**, with provider delivery unverified. This is a local endpoint test, not an independently observed QuickNode delivery. Say so in the recording and keep the provider-delivery gate Pending.
+
+If reusing a database, an existing authenticated record remains **Authenticated Stream payload** after a shared-secret retry; that label still does not prove provider origin. Legacy records without stored receipt time or HMAC evidence are labelled **Stream endpoint record**. Do not relabel either as a fresh shared-secret delivery. Use loopback HTTP for local testing or HTTPS for an explicitly chosen remote endpoint; never send the shared secret to a remote HTTP URL or seed the public preview index for this demonstration.
 
 ## Observed state and how to finish the live check
 
