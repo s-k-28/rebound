@@ -201,6 +201,13 @@ class InboxUI:
             text_size=14, filled=True, fill_color="#FFFFFF", border_color=LINE,
             focused_border_color=BLUE, border_radius=10, autocorrect=False, on_change=self.caller_changed,
         )
+        self.receipt_hash_input = ft.TextField(
+            label="Submitted Arc transaction hash", hint_text="0x…", text_size=12,
+            filled=True, fill_color="#FFFFFF", border_color=LINE, focused_border_color=BLUE,
+            border_radius=9, content_padding=14, autocorrect=False, on_submit=self.verify_arc_receipt,
+        )
+        self.receipt_error = ""
+        self._receipt_request = None
         self.review_error = ""
         self.preparing = False
         self.refreshing = False
@@ -646,6 +653,13 @@ class InboxUI:
         if destination_url:
             controls.insert(2, ft.Container(ft.TextButton("Open verified Arc receipt", url=destination_url,
                 icon=ft.Icons.OPEN_IN_NEW_ROUNDED), padding=ft.Padding.only(left=12, bottom=10)))
+        submitted_url = self.submitted_receipt_url(item)
+        if submitted_url:
+            controls.insert(2, ft.Container(ft.Column([
+                self.text("Submitted Arc receipt verified", 12, BLUE, ft.FontWeight.W_600),
+                self.text("The receipt matches this transfer's original signed message.", 11, MUTED),
+                ft.TextButton("Open submitted Arc receipt", url=submitted_url, icon=ft.Icons.OPEN_IN_NEW_ROUNDED),
+            ], spacing=7), padding=ft.Padding.only(left=22, right=22, bottom=15)))
         evidence_controls = [
                 self.value_line("Source transaction", item["tx_hash"], selectable=True),
                 self.value_line("Destination caller", "Any caller" if item.get("caller") == ZERO else item.get("caller", "Unknown"), selectable=True),
@@ -695,6 +709,9 @@ class InboxUI:
             fields.append(f"Arc nonce {nonce_status} at block {item['destination_block']}")
         if item.get("destination_url"):
             fields.append(f"Verified Arc receipt: {item['destination_url']}")
+        submitted_url = self.submitted_receipt_url(item)
+        if submitted_url:
+            fields.append(f"Verified submitted Arc receipt: {submitted_url}")
         await self.clipboard.set("\n".join(fields))
         self.page.show_dialog(ft.SnackBar(content=self.text("Transfer evidence copied", color="#FFFFFF")))
 
@@ -730,6 +747,7 @@ class InboxUI:
             self.state.selected = None
             self.state.prepared = None
             self.review_error = ""
+            self.clear_receipt_editor()
             return True
         return False
 
@@ -763,9 +781,21 @@ class InboxUI:
             controls.append(self.text(description, 14, MUTED))
             if item["status"] == "expired":
                 controls.append(ft.TextButton("Circle re-attestation guide", url="https://developers.circle.com/cctp/references/technical-guide#message-body", icon=ft.Icons.OPEN_IN_NEW_ROUNDED))
+        if self.receipt_editor_available(item):
+            self.receipt_hash_input.disabled = self._receipt_request is not None
+            controls.extend([
+                self.text("Verify a submitted Arc receipt", 14, INK, ft.FontWeight.W_600),
+                self.text("Paste the Arc transaction hash to check it against this transfer's original message.", 12, MUTED),
+                self.receipt_hash_input,
+                self.button("Verifying receipt…" if self._receipt_request is not None else "Verify Arc receipt",
+                            self.verify_arc_receipt, primary=True, icon=ft.Icons.FACT_CHECK_OUTLINED,
+                            disabled=self._receipt_request is not None or self.refreshing or self.state.busy),
+            ])
+            if self.receipt_error:
+                controls.append(self.text(self.receipt_error, 12, "#AE3434"))
         if not self.state.example:
             controls.append(self.button("Checking transfer…" if self.refreshing else "Refresh this transfer",
-                            self.refresh_transfer, disabled=self.refreshing or self.preparing or self.state.busy,
+                            self.refresh_transfer, disabled=self.refreshing or self.preparing or self.state.busy or self._receipt_request is not None,
                             icon=ft.Icons.REFRESH_ROUNDED))
             if self.refresh_error:
                 controls.append(self.text(self.refresh_error, 13, "#AE3434"))
@@ -836,6 +866,7 @@ class InboxUI:
     async def scan(self, _=None, *, mode: str = "wallet", log_index: int | None = None) -> None:
         if self.state.busy:
             return
+        self.clear_receipt_editor()
         self.state.busy = True
         self.render()
         search = self.tx_input.value if mode == "transaction" else self.wallet_input.value or self.state.wallet
@@ -871,6 +902,7 @@ class InboxUI:
         # Drop the previous page's financial state before processing its new URL.
         # In-flight reads keep their old InboxState and cannot replace this route.
         self.state = InboxState()
+        self.clear_receipt_editor()
         self.review_error = ""
         self.refresh_error = ""
         self.show_transaction = False
@@ -899,16 +931,79 @@ class InboxUI:
             if (item["tx_hash"], item["log_index"]) == (tx_hash.lower(), int(index)):
                 self.inspect(item, reset_scroll=reset_scroll)
 
+    def submitted_receipt_url(self, item: dict) -> str | None:
+        if self.state.example or item.get("example") or item.get("submitted_receipt_verified") is not True:
+            return None
+        return item.get("submitted_receipt_url") or None
+
+    def receipt_editor_available(self, item: dict) -> bool:
+        return (not self.state.example and not item.get("example")
+                and not str(item.get("key", "")).startswith("example-")
+                and item.get("status") == "completed" and not item.get("destination_url")
+                and not self.submitted_receipt_url(item))
+
+    def clear_receipt_editor(self) -> None:
+        self.receipt_hash_input.value = ""
+        self.receipt_error = ""
+        self._receipt_request = None
+
+    async def verify_arc_receipt(self, _=None) -> None:
+        state, item = self.state, self.state.selected
+        if (item is None or not self.receipt_editor_available(item) or self._receipt_request is not None
+                or state.busy or self.refreshing or self.preparing):
+            return
+        try:
+            destination_hash = hash32((self.receipt_hash_input.value or "").strip())
+        except ValueError as exc:
+            self.receipt_error = str(exc)
+            self.render()
+            return
+        request = object()
+        self._receipt_request = request
+        self.receipt_error = ""
+        self.render()
+
+        def still_selected():
+            return (self._receipt_request is request and self.state is state and state.selected is item
+                    and not state.example and not item.get("example")
+                    and (self.receipt_hash_input.value or "").strip().lower() == destination_hash)
+
+        try:
+            result = await self.service.inspect_transaction(item["tx_hash"], log_index=item["log_index"],
+                                                             destination_hash=destination_hash)
+            if not still_selected():
+                return
+            transfers = result["transfers"]
+            if (len(transfers) != 1 or transfers[0]["key"] != item["key"]
+                    or (transfers[0]["tx_hash"], transfers[0]["log_index"]) != (item["tx_hash"], item["log_index"])
+                    or transfers[0].get("submitted_destination_hash") != destination_hash):
+                raise ValueError("The receipt check did not return this original transfer and submitted hash.")
+            fresh = transfers[0] | {"discovery_source": item.get("discovery_source", "receipt")}
+            if fresh["status"] != "completed":
+                raise ValueError("Receipt verification is unavailable. Showing the previous transfer result; refresh and try again.")
+            state.transfers = [fresh if row["key"] == item["key"] else row for row in state.transfers]
+            state.selected = fresh
+            if not self.submitted_receipt_url(fresh):
+                self.receipt_error = "Arc receipt not verified. Check the transaction hash and try again after it confirms."
+        except Exception as exc:
+            if still_selected():
+                self.receipt_error = safe_error(exc)
+        finally:
+            if self._receipt_request is request:
+                self._receipt_request = None
+                self.render()
+
     async def refresh_transfer(self, _=None) -> None:
         state, item = self.state, self.state.selected
-        if state.busy or state.example or item is None or self.refreshing or self.preparing:
+        if state.busy or state.example or item is None or self.refreshing or self.preparing or self._receipt_request is not None:
             return
         self.refreshing = True
         self.refresh_error = ""
         state.prepared = None
         self.render()
         try:
-            result = await self.service.inspect_transaction(item["tx_hash"], log_index=item["log_index"])
+            options = {"destination_hash": item["submitted_destination_hash"]} if self.submitted_receipt_url(item) else {}
+            result = await self.service.inspect_transaction(item["tx_hash"], log_index=item["log_index"], **options)
             transfers = result["transfers"]
             if len(transfers) != 1 or transfers[0]["key"] != item["key"]:
                 raise ValueError("The original supported burn was not found in its current source receipt.")
@@ -953,6 +1048,7 @@ class InboxUI:
         self.render()
 
     def examples(self, _=None) -> None:
+        self.clear_receipt_editor()
         self.show_transaction = False
         self.wallet_input.value = EXAMPLE_WALLET
         self.state.load_examples()
@@ -971,6 +1067,7 @@ class InboxUI:
             self.page.show_dialog(ft.SnackBar(content=self.text("Demo wallet copied", color="#FFFFFF")))
 
     def return_live(self, _=None) -> None:
+        self.clear_receipt_editor()
         if (self.wallet_input.value or "").strip().lower() == EXAMPLE_WALLET:
             self.wallet_input.value = self.state.wallet
         self.state = InboxState(wallet=self.state.wallet)
@@ -983,6 +1080,8 @@ class InboxUI:
 
     def inspect(self, item, *, reset_scroll: bool = True) -> None:
         changed = item is not self.state.selected
+        if changed:
+            self.clear_receipt_editor()
         self.state.selected = item
         self.state.prepared = None
         self.caller_input.value = ""
@@ -1019,6 +1118,7 @@ class InboxUI:
                     raise
 
     def back(self, _=None) -> None:
+        self.clear_receipt_editor()
         self.state.selected = None
         self.state.prepared = None
         self.render()
