@@ -8,6 +8,110 @@ from tests.test_protocol import WALLET
 pytest_plugins = ["tests.test_service"]
 
 
+@pytest.mark.parametrize("signed", [False, True])
+async def test_stream_slots_apply_before_body_reads_and_release_after_success(setup_service, signed):
+    import hmac
+    import time
+    from dataclasses import replace
+
+    from rebound.app import STREAM_MAX_IN_FLIGHT, create_app
+
+    recovery, _ = setup_service
+    token, secret = "quicknode-test-token", "local-test-secret"
+    recovery.settings = replace(recovery.settings,
+        stream_security_token=token if signed else "", stream_secret=secret)
+    body = b'{"logs": []}'
+    if signed:
+        nonce, timestamp = "fixture-delivery", str(int(time.time()))
+        headers = {"x-qn-nonce": nonce, "x-qn-timestamp": timestamp,
+                   "x-qn-signature": hmac.digest(token.encode(), (nonce + timestamp).encode() + body, "sha256").hex()}
+    else:
+        headers = {"x-rebound-secret": secret}
+    app = create_app(recovery, include_ui=False)
+    release = asyncio.Event()
+    started = [asyncio.Event() for _ in range(STREAM_MAX_IN_FLIGHT)]
+    probe_read = asyncio.Event()
+
+    async def held_body(event):
+        event.set()
+        await release.wait()
+        yield body
+
+    async def probe_body():
+        probe_read.set()
+        yield body
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        requests = [asyncio.create_task(client.post("/api/streams", content=held_body(event), headers=headers))
+                    for event in started]
+        try:
+            await asyncio.wait_for(asyncio.gather(*(event.wait() for event in started)), timeout=1)
+            full = await client.post("/api/streams", content=probe_body(), headers=headers)
+            assert full.status_code == 429 and full.headers["retry-after"] == "5"
+            assert not probe_read.is_set()
+            # Authentication remains headers-first even when admission is full.
+            unauthorized = await client.post("/api/streams", content=probe_body())
+            assert unauthorized.status_code == 401 and not probe_read.is_set()
+        finally:
+            release.set()
+            responses = await asyncio.gather(*requests)
+        assert all(response.status_code == 200 for response in responses)
+        assert (await client.post("/api/streams", content=body, headers=headers)).status_code == 200
+
+
+async def test_stream_body_read_timeout_returns_408_and_releases_slot(setup_service, monkeypatch):
+    from dataclasses import replace
+
+    from rebound import app as module
+
+    monkeypatch.setattr(module, "STREAM_MAX_IN_FLIGHT", 1)
+    monkeypatch.setattr(module, "STREAM_BODY_TIMEOUT_SECONDS", 0.01)
+    recovery, _ = setup_service
+    recovery.settings = replace(recovery.settings, stream_secret="test-secret")
+    app = module.create_app(recovery, include_ui=False)
+    finished = asyncio.Event()
+
+    async def delayed_body():
+        try:
+            await asyncio.Event().wait()
+            yield b'{"logs": []}'
+        finally:
+            finished.set()
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        headers = {"x-rebound-secret": "test-secret"}
+        response = await asyncio.wait_for(client.post("/api/streams", content=delayed_body(), headers=headers), timeout=1)
+        assert response.status_code == 408 and "timed out" in response.json()["detail"]
+        assert finished.is_set()
+        assert (await client.post("/api/streams", json={"logs": []}, headers=headers)).status_code == 200
+
+
+async def test_cancelled_stream_body_read_releases_slot(setup_service, monkeypatch):
+    from dataclasses import replace
+
+    from rebound import app as module
+
+    monkeypatch.setattr(module, "STREAM_MAX_IN_FLIGHT", 1)
+    recovery, _ = setup_service
+    recovery.settings = replace(recovery.settings, stream_secret="test-secret")
+    app = module.create_app(recovery, include_ui=False)
+    started = asyncio.Event()
+
+    async def delayed_body():
+        started.set()
+        await asyncio.Event().wait()
+        yield b'{"logs": []}'
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        headers = {"x-rebound-secret": "test-secret"}
+        request = asyncio.create_task(client.post("/api/streams", content=delayed_body(), headers=headers))
+        await asyncio.wait_for(started.wait(), timeout=1)
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        assert (await client.post("/api/streams", json={"logs": []}, headers=headers)).status_code == 200
+
+
 async def test_readiness_reports_individual_providers_and_caches_recent_checks(setup_service):
     from rebound.app import create_app
 

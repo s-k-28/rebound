@@ -24,6 +24,8 @@ WALLET_PATTERN = r"^0x[0-9a-fA-F]{40}$"
 HASH_PATTERN = r"^0x[0-9a-fA-F]{64}$"
 STREAM_BODY_LIMIT = 2_000_000
 STREAM_SIGNATURE_WINDOW_SECONDS = 900
+STREAM_MAX_IN_FLIGHT = 4
+STREAM_BODY_TIMEOUT_SECONDS = 10
 
 
 class PrepareRequest(BaseModel):
@@ -109,6 +111,22 @@ def create_app(recovery: RecoveryService | None = None, *, include_ui: bool = Tr
     async def replay(tx_hash: str, log_index: Annotated[int, Query(ge=0)]):
         return await checked(recovery.replay_mint, tx_hash, log_index)
 
+    stream_in_flight = 0
+
+    @asynccontextmanager
+    async def stream_slot():
+        nonlocal stream_in_flight
+        # No await between checking and reserving: admission is atomic on this
+        # ASGI worker's event loop, with no waiting requests holding upload bodies.
+        if stream_in_flight >= STREAM_MAX_IN_FLIGHT:
+            raise HTTPException(429, "Stream receiver is busy. Retry delivery shortly.",
+                                headers={"Retry-After": "5"})
+        stream_in_flight += 1
+        try:
+            yield
+        finally:
+            stream_in_flight -= 1
+
     @api.post("/api/streams")
     async def stream(request: Request, x_rebound_secret: Annotated[str | None, Header()] = None):
         settings = recovery.settings
@@ -118,11 +136,19 @@ def create_app(recovery: RecoveryService | None = None, *, include_ui: bool = Tr
         if not token and not secrets.compare_digest((x_rebound_secret or "").encode(), settings.stream_secret.encode()):
             raise HTTPException(401, "Invalid Stream authentication.")
         signature_headers = stream_signature_headers(request) if token else None
+        async with stream_slot():
+            return await consume_stream(request, signature_headers, token)
+
+    async def consume_stream(request: Request, signature_headers: tuple[bytes, str] | None, token: str):
         wire_body = bytearray()
-        async for chunk in request.stream():
-            if len(wire_body) + len(chunk) > STREAM_BODY_LIMIT:
-                raise HTTPException(413, "Stream payload exceeds 2 MB.")
-            wire_body.extend(chunk)
+        try:
+            async with asyncio.timeout(STREAM_BODY_TIMEOUT_SECONDS):
+                async for chunk in request.stream():
+                    if len(wire_body) + len(chunk) > STREAM_BODY_LIMIT:
+                        raise HTTPException(413, "Stream payload exceeds 2 MB.")
+                    wire_body.extend(chunk)
+        except TimeoutError as exc:
+            raise HTTPException(408, "Stream body reading timed out. Retry delivery.") from exc
         encoding = request.headers.get("content-encoding", "identity").lower()
         if encoding == "gzip":
             try:
