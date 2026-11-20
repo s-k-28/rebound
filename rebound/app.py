@@ -4,6 +4,7 @@ import gzip
 import hmac
 import io
 import json
+import re
 import secrets
 import time
 import zlib
@@ -31,18 +32,16 @@ class PrepareRequest(BaseModel):
     caller: str = Field(pattern=WALLET_PATTERN)
 
 
-def verify_stream_signature(request: Request, body: bytes, token: str) -> None:
+def stream_signature_headers(request: Request) -> tuple[bytes, str]:
     nonce = request.headers.get("x-qn-nonce", "")
     timestamp = request.headers.get("x-qn-timestamp", "")
     signature = request.headers.get("x-qn-signature", "")
     if not (0 < len(nonce) <= 128 and nonce.isascii() and timestamp.isascii()
             and timestamp.isdecimal() and len(timestamp) <= 12
             and abs(time.time() - int(timestamp)) <= STREAM_SIGNATURE_WINDOW_SECONDS
-            and signature.isascii() and len(signature) == 64):
+            and re.fullmatch(r"[0-9a-fA-F]{64}", signature)):
         raise HTTPException(401, "Invalid or stale Stream signature.")
-    expected = hmac.digest(token.encode(), (nonce + timestamp).encode() + body, "sha256").hex()
-    if not hmac.compare_digest(expected, signature.lower()):
-        raise HTTPException(401, "Invalid or stale Stream signature.")
+    return (nonce + timestamp).encode(), signature.lower()
 
 
 def create_app(recovery: RecoveryService | None = None, *, include_ui: bool = True) -> FastAPI:
@@ -116,6 +115,7 @@ def create_app(recovery: RecoveryService | None = None, *, include_ui: bool = Tr
             raise HTTPException(503, "Stream ingestion is not configured.")
         if not token and not secrets.compare_digest((x_rebound_secret or "").encode(), settings.stream_secret.encode()):
             raise HTTPException(401, "Invalid Stream authentication.")
+        signature_headers = stream_signature_headers(request) if token else None
         wire_body = bytearray()
         async for chunk in request.stream():
             if len(wire_body) + len(chunk) > STREAM_BODY_LIMIT:
@@ -134,8 +134,11 @@ def create_app(recovery: RecoveryService | None = None, *, include_ui: bool = Tr
             body = bytes(wire_body)
         else:
             raise HTTPException(415, "Stream payload encoding is unsupported.")
-        if token:
-            verify_stream_signature(request, body, token)
+        if signature_headers:
+            prefix, signature = signature_headers
+            expected = hmac.digest(token.encode(), prefix + body, "sha256").hex()
+            if not hmac.compare_digest(expected, signature):
+                raise HTTPException(401, "Invalid or stale Stream signature.")
         try:
             payload = json.loads(body)
             if isinstance(payload, dict) and "logs" not in payload:

@@ -627,6 +627,8 @@ class InboxUI:
             values.append(self.value_line("Discovered via", discovery))
         if item.get("checked_at"):
             values.append(self.value_line("Source event", f"Block {item['block_number']:,} · log {item['log_index']}"))
+        if item.get("source_confirmations") is not None:
+            values.append(self.value_line("Base confirmations", f"{item['source_confirmations']:,}"))
         if item.get("destination_block") is not None:
             nonce_status = "Consumed" if item["nonce_used"] else "Unused"
             values.append(self.value_line("Arc nonce check", f"{nonce_status} at block {item['destination_block']:,}"))

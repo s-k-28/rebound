@@ -14,6 +14,8 @@ from rebound import protocol as p
 from rebound.clients import Circle, RangeLimitError, Rpc, UpstreamError, quantity
 from rebound.store import CandidateStore, IndexedBurn
 
+MIN_RECOVERY_CONFIRMATIONS = 12
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -79,7 +81,7 @@ EXPLANATIONS = {
     "completed": "Arc has already consumed this message's nonce. Do not send or mint again.",
     "expired": "The attestation expired before delivery. Request re-attestation for the existing burn; do not send USDC again.",
     "caller_required": "This transfer permits only its original destination caller. Rebound cannot substitute a different caller.",
-    "source_confirming": "The source burn is still recent. Wait for at least 12 source confirmations and refresh.",
+    "source_confirming": f"Wait for {MIN_RECOVERY_CONFIRMATIONS} Base confirmations before preparing recovery.",
     "awaiting_attestation": "The source burn is confirmed, but Circle's matching signed message is not available yet. Refresh later.",
     "unsupported": "The available message cannot be matched safely to this supported transfer. No recovery transaction is prepared.",
     "source_changed": "The indexed burn no longer matches the canonical source chain. Refresh and investigate the original receipt.",
@@ -489,6 +491,7 @@ class RecoveryService:
             "source_url": f"https://sepolia.basescan.org/tx/{burn.tx_hash}",
             "destination_url": None,
             "source_verified": False, "attestation_matched": False,
+            "source_confirmations": None,
             "destination_block": None, "nonce_used": None, "expiration_block": None,
             "delivery_mode": None, "forward_state": None,
         }
@@ -500,11 +503,16 @@ class RecoveryService:
             row["source_verified"] = True
             if burn.destination_domain != 26:
                 raise ValueError("Unsupported destination route.")
+            if source_head is None:
+                source_head = quantity(await self.base.call("eth_blockNumber"))
+            confirmations = max(0, source_head - burn.block_number + 1)
+            row["source_confirmations"] = confirmations
+            source_confirming = confirmations < MIN_RECOVERY_CONFIRMATIONS
             delivery_mode = p.forwarding_hook_kind(burn.hook)
             row["delivery_mode"] = delivery_mode
             attested = await self._matched_attestation(burn, inspect_forwarding=bool(delivery_mode))
             if attested is None:
-                status = "awaiting_attestation"
+                status = "source_confirming" if source_confirming else "awaiting_attestation"
             else:
                 message = attested.message
                 row.update(nonce=message.nonce, fee=p.usdc(message.fee), net_amount=p.usdc(message.amount - message.fee),
@@ -520,11 +528,8 @@ class RecoveryService:
                         row["destination_url"] = f"{p.ARC_EXPLORER}/tx/{p.hash32(receipt['transactionHash'])}"
                 elif delivery_mode:
                     status = "managed_delivery"
-                elif status == "ready":
-                    if source_head is None:
-                        source_head = quantity(await self.base.call("eth_blockNumber"))
-                    if source_head - burn.block_number + 1 < 12:
-                        status = "source_confirming"
+                elif status == "ready" and source_confirming:
+                    status = "source_confirming"
             row.update(status=status, explanation=EXPLANATIONS[status])
         except SourceChanged:
             row.update(status="source_changed", explanation=EXPLANATIONS["source_changed"])
@@ -548,7 +553,7 @@ class RecoveryService:
         if burn.hook:
             raise ValueError("This burn contains a delivery hook. Check its status with the original app.")
         head = quantity(await self.base.call("eth_blockNumber"))
-        if head - burn.block_number + 1 < 12:
+        if head - burn.block_number + 1 < MIN_RECOVERY_CONFIRMATIONS:
             raise ValueError("Transfer is source_confirming. Wait for more source confirmations.")
         attested = await self._matched_attestation(burn)
         if attested is None:

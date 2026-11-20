@@ -174,6 +174,8 @@ async def test_quicknode_signature_verifies_the_decoded_payload_and_blocks_fallb
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         url = "/api/streams"
         assert (await client.post(url, content=body, headers={"x-rebound-secret": "legacy-test-secret"})).status_code == 401
+        unsigned = await client.post(url, content=b"bad gzip", headers={"Content-Encoding": "gzip"})
+        assert unsigned.status_code == 401
         assert (await client.post(url, content=body + b" ", headers=headers)).status_code == 401
         assert (await client.post(url, content=body, headers=signed(int(time.time()) - 1000))).status_code == 401
         assert (await client.get("/api/stream-index", params={"wallet": WALLET})).json()["transfers"] == []

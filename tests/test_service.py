@@ -40,7 +40,7 @@ def setup_service(tmp_path):
             case "eth_getCode":
                 result = state.get("code", "0x6001")
             case "eth_blockNumber":
-                result = hex(900 if dest else 200)
+                result = hex(900 if dest else state.get("base_head", 200))
             case "eth_getBlockByNumber":
                 result = {"hash": "0x" + ("ef" if state["canonical"] else "aa") * 32}
             case "eth_getLogs":
@@ -117,6 +117,19 @@ async def test_circle_404_is_waiting_but_500_is_unavailable(setup_service):
     assert (await app.scan(WALLET, blocks=150))["transfers"][0]["status"] == "awaiting_attestation"
     state["circle_status"] = 500
     assert (await app.scan(WALLET, blocks=150))["transfers"][0]["status"] == "unavailable"
+
+
+async def test_recent_source_burn_reports_confirmations_before_waiting_for_circle(setup_service):
+    app, state = setup_service
+    state.update(base_head=103, circle_status=404)
+    row, = (await app.scan(WALLET, blocks=10))["transfers"]
+    assert row["status"] == "source_confirming"
+    assert row["source_confirmations"] == 4
+
+    state["base_head"] = 111
+    row, = (await app.scan(WALLET, blocks=20))["transfers"]
+    assert row["status"] == "awaiting_attestation"
+    assert row["source_confirmations"] == 12
 
 
 async def test_same_transaction_multiple_messages_match_burn_not_first_api_item(setup_service):
