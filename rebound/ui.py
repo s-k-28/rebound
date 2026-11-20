@@ -234,6 +234,7 @@ class InboxUI:
         self.motion_enabled = False
         self._revealing_item = None
         self._installed = False
+        self._active_route = None
 
     def install(self) -> None:
         self.page.title = "Rebound · Transfer inbox"
@@ -245,6 +246,7 @@ class InboxUI:
         self.page.services.append(self.clipboard)
         self.page.services.append(self.semantics)
         self.page.on_resize = self.resize
+        self.page.on_route_change = self.route_changed
         self.page.add(self.root)
         self._installed = True
         self.render()
@@ -857,6 +859,23 @@ class InboxUI:
     async def inspect_transaction(self, _=None) -> None:
         await self.scan(mode="transaction")
 
+    async def route_changed(self, event) -> None:
+        await self.navigate(event.route)
+
+    async def navigate(self, route: str) -> None:
+        if route == self._active_route:
+            return
+        self._active_route = route
+        # Flet can reconnect an existing page session after browser navigation.
+        # Drop the previous page's financial state before processing its new URL.
+        # In-flight reads keep their old InboxState and cannot replace this route.
+        self.state = InboxState()
+        self.review_error = ""
+        self.refresh_error = ""
+        self.show_transaction = False
+        self.render()
+        await self.open_case(route)
+
     async def open_case(self, route: str) -> None:
         if route.partition("?")[0].rstrip("/") == "/demo":
             self.examples()
@@ -1043,5 +1062,5 @@ def build_main(service):
         ui = InboxUI(page, service)
         ui.install()
         await ui.load_motion_preference()
-        await ui.open_case(page.route)
+        await ui.navigate(page.route)
     return main

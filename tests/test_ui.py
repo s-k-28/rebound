@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -91,6 +92,43 @@ async def test_shared_case_rechecks_one_public_source_event(monkeypatch):
     assert app.state.selected is item
     assert app.case_link(item) == f"https://rebound.example/transfer/{tx_hash}/4"
     assert app.case_link(item | {"example": True}) is None
+
+
+async def test_route_change_replaces_selected_demo_with_the_requested_live_case(monkeypatch):
+    tx_hash = "0x" + "aa" * 32
+    item = {"key": "live-case", "tx_hash": tx_hash, "log_index": 4, "status": "completed"}
+    class CaseService:
+        async def inspect_transaction(self, source_hash, *, log_index):
+            assert (source_hash, log_index) == (tx_hash, 4)
+            return {"transfers": [item], "coverage": "One source receipt"}
+    app = ui.InboxUI(object(), CaseService())
+    monkeypatch.setattr(app, "render", lambda: None)
+    app.state.load_examples()
+    app.state.selected = app.state.transfers[0]
+    await app.route_changed(SimpleNamespace(route=f"/transfer/{tx_hash}/4"))
+    assert app.state.example is False
+    assert app.state.selected is item
+
+
+async def test_navigation_to_demo_does_not_accept_a_previous_case_result(monkeypatch):
+    started, finish = asyncio.Event(), asyncio.Event()
+    tx_hash = "0x" + "aa" * 32
+    item = {"key": "old-case", "tx_hash": tx_hash, "log_index": 4, "status": "completed"}
+    class DelayedCase:
+        async def inspect_transaction(self, source_hash, *, log_index):
+            started.set()
+            await finish.wait()
+            return {"transfers": [item], "coverage": "One source receipt"}
+    app = ui.InboxUI(object(), DelayedCase())
+    monkeypatch.setattr(app, "render", lambda: None)
+    pending = asyncio.create_task(app.route_changed(SimpleNamespace(route=f"/transfer/{tx_hash}/4")))
+    await started.wait()
+    await app.route_changed(SimpleNamespace(route="/demo"))
+    finish.set()
+    await pending
+    assert app.state.example is True
+    assert len(app.state.transfers) == 4
+    assert app.state.selected is None
 
 
 async def test_synthetic_wallet_has_a_separate_stream_flow_without_live_requests():
