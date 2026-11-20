@@ -959,10 +959,10 @@ class InboxUI:
         live = not self.state.example and not item.get("example")
         now = now or datetime.now(UTC)
 
-        def line(value):
-            return self.text(value, 12, INK_2, mono=True, selectable=True)
-        burned = burn_time(item, now)
-        burn = [line(burned)] if burned else []
+        def line(value, *, selectable=True):
+            return self.text(value, 12, INK_2, mono=True, selectable=selectable)
+        burned = burn_time(item, now) if live else None
+        burn = [line(burned, selectable=False)] if burned else []
         burn.extend([line(f"Block {item['block_number']:,}, log {item['log_index']}"),
                      line(f"Tx {shorten(item['tx_hash'], 6)}")])
         confirmations = item.get("source_confirmations")
@@ -981,7 +981,7 @@ class InboxUI:
         submitted_url = self.submitted_receipt_url(item)
         minted = mint_time(item, now) if destination_url or submitted_url else None
         if minted:
-            mint.append(line(minted))
+            mint.append(line(minted, selectable=False))
         if item.get("destination_block") is not None:
             # destination_block is when Rebound read the nonce, not when the mint happened.
             nonce_status = "used" if item["nonce_used"] else "unused"
