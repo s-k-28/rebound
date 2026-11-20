@@ -58,7 +58,8 @@ How a result is labelled depends on how it arrived:
 | Delivery | Label in the inspector | Independently proves provider delivery |
 |---|---|---|
 | Valid HMAC using the configured token and matching block hash | **Authenticated Stream payload** | No; a local signed replay can pass the same checks |
-| Local shared secret (`REBOUND_STREAM_SECRET`) | Stream endpoint test (no QuickNode signature) | No |
+| Fresh local shared-secret record (`REBOUND_STREAM_SECRET`) | **Shared-secret adapter payload** | No; an existing authenticated record retains its earlier authentication evidence |
+| Legacy record without stored receipt time or HMAC evidence | **Stream endpoint record** | No |
 | Demo wallet fixture | Simulated Stream delivery | No |
 
 For a Stream-found transfer the inspector separates the source burn, authenticated payload and transfer status evidence: the Base Sepolia block, a link to the original burn, the endpoint receipt time, and the source, Circle and Arc checks. **Authenticated Stream payload** means that the configured token validated the payload and its block hash matched. It does not establish who sent the request. Provider observation requires a separate matching dashboard delivery record and canonical source receipt. QuickNode does not report block coverage to Rebound, so an empty result is not proof that no transfer exists.

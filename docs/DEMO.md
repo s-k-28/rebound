@@ -96,7 +96,9 @@ Use this sequence to show Stream-index discovery and its evidence limits. Public
 5. If the operator independently observed a real provider delivery, show a redacted delivery record and match its event identity to the endpoint payload and canonical source receipt. This evidence is separate from the signature check. Public viewers should not need access to a private dashboard. Until this record exists, state that provider delivery is Pending.
 6. Reopen **QuickNode walkthrough** to show authentication, wallet-only discovery and the Arc mint separately from provider observation.
 
-If the label reads **Stream endpoint (no QuickNode signature)** or **Simulated Stream delivery**, present it as an endpoint test or synthetic example. **Authenticated Stream payload** also does not by itself establish provider origin. Preserve the distinction between the recorded QuickNode **Send Payload** setup test, the local signed replay of the controlled burn and independently observed delivery from an actual Stream.
+If the label reads **Shared-secret adapter payload** or **Simulated Stream delivery**, present it as an endpoint test or synthetic example. **Authenticated Stream payload** also does not by itself establish provider origin. Preserve the distinction between the recorded QuickNode **Send Payload** setup test, the local signed replay of the controlled burn and independently observed delivery from an actual Stream.
+
+For a fresh shared-secret demonstration, follow the [isolated local setup](QUICKNODE.md#showing-the-integration-without-a-live-delivery). A reused authenticated record keeps its authentication label; a legacy **Stream endpoint record** has no stored receipt time or HMAC evidence. Neither proves provider delivery.
 
 ## Final sign-off checklist
 
