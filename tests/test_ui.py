@@ -18,6 +18,146 @@ class RecordingService:
         return {"transaction": {"to": "0x" + "11" * 20}, "recipient": caller}
 
 
+def completed_without_receipt():
+    return {"key": "source-case", "tx_hash": "0x" + "aa" * 32, "log_index": 4,
+            "status": "completed", "example": False, "destination_url": None,
+            "discovery_source": "stream"}
+
+
+async def test_submitted_arc_receipt_is_verified_without_replacing_indexed_receipt(monkeypatch):
+    source = completed_without_receipt()
+    destination_hash = "0x" + "bb" * 32
+    class ReceiptService:
+        async def inspect_transaction(self, tx_hash, *, log_index, destination_hash):
+            assert (tx_hash, log_index, destination_hash) == (source["tx_hash"], 4, "0x" + "bb" * 32)
+            return {"transfers": [source | {"submitted_destination_hash": destination_hash,
+                "submitted_receipt_verified": True, "submitted_receipt_url": "https://explorer.testnet.arc.io/tx/" + destination_hash}]}
+    app = ui.InboxUI(object(), ReceiptService())
+    monkeypatch.setattr(app, "render", lambda: None)
+    app.state.transfers = [source]
+    app.state.selected = source
+    app.receipt_hash_input.value = destination_hash
+    await app.verify_arc_receipt()
+    assert app.state.selected["submitted_receipt_verified"] is True
+    assert app.state.selected["destination_url"] is None
+    assert app.state.selected["discovery_source"] == "stream"
+    assert app.state.transfers == [app.state.selected]
+    assert app.receipt_error == ""
+
+
+async def test_failed_receipt_match_does_not_create_a_link(monkeypatch):
+    source = completed_without_receipt()
+    class ReceiptService:
+        async def inspect_transaction(self, tx_hash, *, log_index, destination_hash):
+            return {"transfers": [source | {"submitted_destination_hash": destination_hash,
+                "submitted_receipt_verified": False, "submitted_receipt_url": None}]}
+    app = ui.InboxUI(object(), ReceiptService())
+    monkeypatch.setattr(app, "render", lambda: None)
+    app.state.selected = source
+    app.receipt_hash_input.value = "0x" + "bb" * 32
+    await app.verify_arc_receipt()
+    assert app.state.selected["submitted_receipt_url"] is None
+    assert "not verified" in app.receipt_error.lower()
+
+
+async def test_receipt_verification_cannot_replace_a_new_selection(monkeypatch):
+    started, finish = asyncio.Event(), asyncio.Event()
+    source = completed_without_receipt()
+    class DelayedReceipt:
+        async def inspect_transaction(self, tx_hash, *, log_index, destination_hash):
+            started.set()
+            await finish.wait()
+            return {"transfers": [source | {"submitted_receipt_verified": True,
+                "submitted_receipt_url": "https://explorer.testnet.arc.io/tx/" + destination_hash}]}
+    app = ui.InboxUI(object(), DelayedReceipt())
+    monkeypatch.setattr(app, "render", lambda: None)
+    app.state.selected = source
+    app.receipt_hash_input.value = "0x" + "bb" * 32
+    pending = asyncio.create_task(app.verify_arc_receipt())
+    await started.wait()
+    other = source | {"key": "other-case", "tx_hash": "0x" + "cc" * 32}
+    app.inspect(other)
+    finish.set()
+    await pending
+    assert app.state.selected is other
+    assert app.receipt_hash_input.value == ""
+    assert app.receipt_error == ""
+
+
+async def test_editing_receipt_hash_invalidates_a_pending_result(monkeypatch):
+    started, finish = asyncio.Event(), asyncio.Event()
+    source = completed_without_receipt()
+    class DelayedReceipt:
+        async def inspect_transaction(self, tx_hash, *, log_index, destination_hash):
+            started.set()
+            await finish.wait()
+            return {"transfers": [source | {"submitted_receipt_verified": True,
+                "submitted_receipt_url": "https://explorer.testnet.arc.io/tx/" + destination_hash}]}
+    app = ui.InboxUI(object(), DelayedReceipt())
+    monkeypatch.setattr(app, "render", lambda: None)
+    app.state.selected = source
+    app.receipt_hash_input.value = "0x" + "bb" * 32
+    pending = asyncio.create_task(app.verify_arc_receipt())
+    await started.wait()
+    app.receipt_hash_input.value = "0x" + "dd" * 32
+    finish.set()
+    await pending
+    assert app.state.selected is source
+    assert not app.state.selected.get("submitted_receipt_url")
+
+
+@pytest.mark.parametrize("changes", [{"example": True}, {"status": "ready"},
+                                     {"destination_url": "https://explorer.testnet.arc.io/tx/indexed"}])
+async def test_receipt_form_is_only_for_unlinked_completed_live_transfers(monkeypatch, changes):
+    class ForbiddenService:
+        async def inspect_transaction(self, *_args, **_kwargs):
+            raise AssertionError("No request should be made for this selection")
+    app = ui.InboxUI(object(), ForbiddenService())
+    monkeypatch.setattr(app, "render", lambda: None)
+    source = completed_without_receipt() | changes
+    app.state.selected = source
+    app.receipt_hash_input.value = "0x" + "bb" * 32
+    await app.verify_arc_receipt()
+    assert app.state.selected is source
+
+
+async def test_invalid_submitted_hash_stays_a_form_error(monkeypatch):
+    app = ui.InboxUI(object(), object())
+    monkeypatch.setattr(app, "render", lambda: None)
+    source = completed_without_receipt()
+    app.state.selected = source
+    app.receipt_hash_input.value = "not-a-hash"
+    await app.verify_arc_receipt()
+    assert "32-byte" in app.receipt_error
+    assert app.state.selected is source
+
+
+def test_unverified_submitted_url_cannot_be_displayed_as_a_receipt():
+    app = ui.InboxUI(object(), object())
+    item = completed_without_receipt() | {"submitted_receipt_verified": False,
+        "submitted_receipt_url": "https://explorer.testnet.arc.io/tx/" + "0x" + "bb" * 32}
+    assert app.submitted_receipt_url(item) is None
+    assert app.receipt_editor_available(item)
+
+
+async def test_refresh_preserves_separately_verified_submitted_receipt(monkeypatch):
+    destination_hash = "0x" + "bb" * 32
+    source = completed_without_receipt() | {"submitted_destination_hash": destination_hash,
+        "submitted_receipt_verified": True,
+        "submitted_receipt_url": "https://explorer.testnet.arc.io/tx/" + destination_hash}
+    class ReceiptService:
+        async def inspect_transaction(self, tx_hash, *, log_index, destination_hash):
+            assert destination_hash == "0x" + "bb" * 32
+            return {"transfers": [source]}
+    app = ui.InboxUI(object(), ReceiptService())
+    monkeypatch.setattr(app, "render", lambda: None)
+    app.state.selected = source
+    app.state.transfers = [source]
+    await app.refresh_transfer()
+    assert app.state.selected["submitted_receipt_verified"] is True
+    assert app.state.selected["destination_url"] is None
+
+
 async def test_pending_review_is_discarded_after_switching_transfers(monkeypatch):
     started = asyncio.Event()
     finished = asyncio.Event()
