@@ -1131,7 +1131,7 @@ class InboxUI:
             facts.append(self.fact("Circle delivery report", item["forward_state"].title(), mono=False))
         if item.get("discovery_source"):
             discovery = {"stream": "Authenticated Stream payload" if authenticated_stream_payload(item)
-                         else "Stream endpoint (shared-secret adapter)",
+                         else "Stream endpoint record",
                          "example_stream": "Simulated Stream delivery", "rpc": "Source RPC history",
                          "receipt": "Base Sepolia receipt"}[item["discovery_source"]]
             facts.append(self.fact("Discovered via", discovery, mono=False))
@@ -1212,20 +1212,19 @@ class InboxUI:
                  "After a lost session a user has only an address. Reading chain history over RPC is bounded, "
                  "slow and often rate limited."),
                 ("Filtered at the source",
-                 "The Stream reads every Base Sepolia block and sends Rebound only Circle CCTP V2 USDC burns."),
+                 "The configured filter selects Circle CCTP V2 USDC burns from Base Sepolia blocks."),
                 ("Index, then verify",
-                 "Rebound stores each delivery, so a wallet search is instant. It then rechecks the source "
-                 "receipt, Circle and Arc before showing a status."),
+                 "The wallet search reads indexed records, then rechecks the source receipt, Circle and Arc."),
             ], numbered=True),
         ]
         record = load_stream_record()
         if record is not None:
             controls.extend([
-                self.text("This Stream", 13, INK, ft.FontWeight.W_700),
-                self.dialog_rows([(label, self.text(value, 12.5, INK_2, mono=label == "Stream ID", selectable=True))
+                self.text("Recorded Stream setup", 13, INK, ft.FontWeight.W_700),
+                self.dialog_rows([(label, self.text(value, 12.5, INK_2, mono=label == "Stream ID",
+                                                    selectable=label == "Stream ID"))
                                   for label, value in stream_facts(record)]),
-                self.text("Recorded from the QuickNode dashboard. Rebound does not query QuickNode, so this is a "
-                          "snapshot, not live state.", 12, INK_3),
+                self.text("Dashboard snapshot recorded during setup. Current provider status is unverified.", 12, INK_3),
             ])
         return controls
 

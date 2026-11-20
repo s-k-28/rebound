@@ -78,6 +78,13 @@ def test_unsigned_delivery_is_never_presented_as_a_quicknode_delivery():
     assert q.authenticated_stream_payload({k: v for k, v in stream_row().items() if k != "stream_signed"}) is False
 
 
+def test_legacy_stream_records_do_not_invent_the_authentication_method():
+    row = stream_row(stream_signed=False, stream_received_at=None)
+    recorded = q.evidence_steps(row, "Ready to finish")[1]
+    assert recorded.title == "Stream endpoint record"
+    assert "no stored receipt time or HMAC evidence" in recorded.detail
+
+
 def test_a_plain_rpc_transfer_cannot_carry_stream_authentication():
     assert q.authenticated_stream_payload(stream_row(discovery_source="rpc")) is False
 
@@ -111,7 +118,7 @@ def test_hmac_authentication_does_not_confirm_actual_provider_delivery():
 def test_adapter_deliveries_do_not_count_as_live_stream_delivery():
     result = checks(delivered=0, local=1, transfers=[stream_row(stream_signed=False)])
     assert result["live"].state == "pending" and result["authenticated"].state == "pending"
-    assert "shared-secret adapter" in result["authenticated"].detail
+    assert "endpoint record" in result["authenticated"].detail
     assert result["discovery"].state == "pending" and result["mint"].state == "pending"
 
 
@@ -418,7 +425,7 @@ def test_unsigned_stream_delivery_is_labelled_as_an_endpoint_test_not_quicknode(
     app = inbox()
     row = stream_row(tx_hash="0x" + "ab" * 32, status="ready", caller="0x" + "00" * 20, stream_signed=False)
     record = screen_text(app.record(row))
-    assert "Stream endpoint (shared-secret adapter)" in record and "Authenticated Stream payload" not in record
+    assert "Stream endpoint record" in record and "Authenticated Stream payload" not in record
     evidence = screen_text(app.quicknode_evidence(row))
     assert "Shared-secret adapter payload" in evidence
     assert "Authenticated Stream payload" not in evidence
@@ -478,7 +485,8 @@ def test_stream_facts_state_the_recorded_snapshot_without_claiming_it_is_live():
     facts = dict(q.stream_facts(q.load_stream_record()))
     assert facts["Stream ID"] == STREAM_ID
     state = next(value for label, value in facts.items() if label.startswith("State on "))
-    assert state.startswith("Terminated. Last block delivered 61,175,720.") and "not reached" in state
+    assert state.startswith("Terminated. Last reported block 61,175,720.") and "not reached" in state
+    assert "0 blocks sent on record" in state and "matched the filter" not in state
     assert "POST /api/streams" in facts["Delivers to"]
 
 
@@ -492,7 +500,7 @@ def test_stream_facts_do_not_invent_a_gap_when_the_stream_passed_the_burn():
 def test_walkthrough_explains_why_quicknode_and_shows_the_recorded_stream():
     shown = screen_text(inbox().stream_context())
     assert "Why QuickNode Streams" in shown and "No hash to start from" in shown
-    assert STREAM_ID in shown and "snapshot, not live state" in shown and "Terminated" in shown
+    assert STREAM_ID in shown and "Dashboard snapshot" in shown and "Terminated" in shown
 
 
 def test_the_stream_id_is_findable_in_the_docs_judges_read():

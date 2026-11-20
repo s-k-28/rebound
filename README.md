@@ -14,7 +14,7 @@ Rebound integrates QuickNode Streams to help users find interrupted USDC transfe
 
 The public preview requires no credentials, wallet connection or QuickNode account. Enter a public testnet address only. Provider setup is an operator task; tokens and optional private RPC URLs stay in server environment variables.
 
-**Why a Stream index.** A user who lost their session may have only an address. RPC history scans are bounded by a selected window and provider retention or query limits. A configured Stream can filter incoming blocks and persist matching burns for later wallet lookup. Index lookup is a database read, followed by independent source receipt, Circle and Arc requests; completion depends on those providers.
+**Why QuickNode Streams.** A user who lost their session may have only an address. RPC history scans are bounded by a selected window and provider retention or query limits. A configured Stream can filter incoming blocks and persist matching burns for later wallet lookup. An index lookup reads the database, then checks the source receipt, Circle and Arc independently.
 
 When a user selects **Search Stream index**, Rebound looks up events associated with their wallet in the persisted Stream index and checks the original burn receipt, Circle’s attestation, and Arc’s on-chain state. This search reads the index only and does not fall back to a source RPC history scan. The user can see whether the transfer is pending, ready to finish, or already complete without looking up the original transaction hash.
 

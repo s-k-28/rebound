@@ -1,8 +1,7 @@
 """Presentation of Stream endpoint evidence, separate from provider observation.
 
-HMAC authentication proves acceptance by the configured endpoint. It does not prove
-that a configured QuickNode Stream delivered the payload; that needs independent
-provider-side evidence. Chain verification remains a separate check.
+HMAC authentication establishes acceptance by the configured endpoint. Confirming a
+QuickNode delivery requires independent dashboard evidence. Chain verification is a separate check.
 """
 import json
 import re
@@ -10,12 +9,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from rebound.service import MIN_RECOVERY_CONFIRMATIONS
+
 # The QuickNode Stream Rebound uses, as recorded from its dashboard. It sits inside the package so
 # the Docker image carries it. It holds no credentials, and the destination is a path, not a host.
 STREAM_RECORD_PATH = Path(__file__).with_name("stream_record.json")
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
-
-from rebound.service import MIN_RECOVERY_CONFIRMATIONS
 
 UNVERIFIED_STATUSES = {"unavailable", "source_changed", "unsupported", "source_confirming", "awaiting_attestation"}
 
@@ -87,8 +86,8 @@ def evidence_steps(item: dict, status_title: str) -> list[EvidenceStep]:
         return []
     if simulated(item):
         return [
-            EvidenceStep("burn", "Source burn", "simulated", "Synthetic burn; no source receipt was checked."),
-            EvidenceStep("delivery", "Simulated Stream delivery", "simulated", "Synthetic endpoint delivery; not provider evidence."),
+            EvidenceStep("burn", "Source burn", "simulated", "Synthetic burn from an example fixture."),
+            EvidenceStep("delivery", "Simulated Stream delivery", "simulated", "Synthetic endpoint delivery from the example fixture."),
             EvidenceStep("status", "Transfer status", "simulated", f"{status_title}. Nothing was checked on chain."),
         ]
     if source_confirmed(item):
@@ -107,12 +106,15 @@ def evidence_steps(item: dict, status_title: str) -> list[EvidenceStep]:
     when = f"Received {received}. " if received else ""
     if authenticated_stream_payload(item):
         delivery = EvidenceStep("delivery", "Authenticated Stream payload", "verified",
-                                when + "HMAC authentication verified; indexed block hash matched. "
+                                when + "HMAC authentication verified. The indexed block hash matched. "
                                 "Actual QuickNode delivery still needs independent provider dashboard evidence.")
-    else:
+    elif received:
         delivery = EvidenceStep("delivery", "Shared-secret adapter payload", "observed",
-                                when + "Accepted by the local endpoint adapter. No HMAC payload evidence; "
-                                "this does not prove provider delivery.")
+                                when + "Accepted by the local endpoint adapter. No HMAC payload evidence was recorded. "
+                                "Provider delivery is unverified.")
+    else:
+        delivery = EvidenceStep("delivery", "Stream endpoint record", "observed",
+                                "This record has no stored receipt time or HMAC evidence. Provider delivery is unverified.")
     circle = "Circle attestation matched" if item.get("attestation_matched") is True else "Circle attestation pending"
     nonce = item.get("nonce_used")
     arc = "Arc nonce used" if nonce is True else "Arc nonce unused" if nonce is False else "Arc nonce not read"
@@ -137,15 +139,15 @@ def walkthrough_checks(*, enabled: bool, delivered: int, last_received: int | No
                                + (f", last {when}." if when else "."))
     elif local_count:
         payload = EvidenceStep("authenticated", "Authenticated Stream payload", "pending",
-                               f"{local_count} shared-secret adapter payload{'s' if local_count != 1 else ''} accepted. "
-                               "This tests the endpoint, not HMAC payload authentication or provider delivery.")
+                               f"{local_count} endpoint record{'s' if local_count != 1 else ''} without stored HMAC evidence. "
+                               "Actual provider delivery remains unverified.")
     else:
         payload = EvidenceStep("authenticated", "Authenticated Stream payload", "pending",
                                "No authenticated payload for this wallet has been observed in the endpoint index.")
     discovery = EvidenceStep("discovery", "Wallet-only discovery", "verified" if found else "pending",
                              f"{len(found)} authenticated indexed burn{'s' if len(found) != 1 else ''} matched to canonical "
                              "source receipts from the address alone. Destination checks are separate." if found else
-                             "Search the Stream index with only the address; source evidence must match before this passes.")
+                             "Search the Stream index with only the address. A canonical source match verifies discovery.")
     mint = EvidenceStep("mint", "Arc mint evidence", "verified" if completed else "pending",
                         "A discovered transfer has an independently verified Arc receipt matching the original message. "
                         "This does not imply the walkthrough sent a transaction." if completed else
@@ -159,7 +161,7 @@ def walkthrough_checks(*, enabled: bool, delivered: int, last_received: int | No
         payload,
         EvidenceStep("live", "Actual provider delivery", "pending",
                      "Not independently observed here. Confirm the configured Stream and matching delivery in the "
-                     "QuickNode dashboard; valid HMAC alone cannot establish who sent a payload."),
+                     "QuickNode dashboard. A valid HMAC alone cannot establish who sent a payload."),
         discovery,
         mint,
     ]
@@ -172,7 +174,7 @@ def load_stream_record(path: Path = STREAM_RECORD_PATH) -> dict | None:
     ``recorded_at``. Callers must present it as recorded, not as live state.
     """
     try:
-        record = json.loads(path.read_text())
+        record = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     if not isinstance(record, dict) or not _UUID.fullmatch(str(record.get("id", ""))):
@@ -188,14 +190,14 @@ def stream_facts(record: dict) -> list[tuple[str, str]]:
     blocks_sent = seen.get("blocks_sent")
     last = seen.get("last_block_delivered")
     state = [f"{seen.get('status', 'Unknown')}."]
-    if isinstance(last, int):
-        state.append(f"Last block delivered {last:,}.")
-    if isinstance(blocks_sent, int):
-        state.append(f"{blocks_sent:,} blocks matched the filter.")
-    if isinstance(seen.get("errors"), int):
+    if type(last) is int:
+        state.append(f"Last reported block {last:,}.")
+    if type(blocks_sent) is int:
+        state.append(f"{blocks_sent:,} blocks sent on record.")
+    if type(seen.get("errors")) is int:
         state.append(f"{seen['errors']} delivery errors.")
     burn = record.get("controlled_burn_block")
-    if isinstance(burn, int) and isinstance(last, int) and last < burn:
+    if type(burn) is int and type(last) is int and last < burn:
         state.append(f"The controlled burn at block {burn:,} was not reached.")
     start = record.get("start_block")
     return [
