@@ -1,5 +1,6 @@
 import asyncio
 import json
+from datetime import UTC, datetime
 
 import httpx
 import pytest
@@ -95,6 +96,151 @@ async def test_future_end_block_is_rejected(setup_service):
     app, _ = setup_service
     with pytest.raises(ValueError, match="at or before"):
         await app.scan(WALLET, end_block=201)
+
+
+def utc_cutoff(timestamp):
+    return datetime.fromtimestamp(timestamp, UTC).isoformat().replace("+00:00", "Z")
+
+
+def time_chain(app, state, times, *, earliest=0, corrupt=None):
+    state["base_head"] = len(times) - 1
+    calls = []
+    original = app.base.call
+
+    async def timed_block(method, params=None):
+        if method == "eth_getBlockByNumber":
+            assert params[1] is False
+            height = earliest if params[0] == "earliest" else int(params[0], 16)
+            assert earliest <= height < len(times)
+            calls.append(height)
+            result = {"number": hex(height), "timestamp": hex(times[height]),
+                      "hash": "0x" + "ef" * 32 if height == 100 else f"0x{height:064x}",
+                      "transactions": ["0x" + "cd" * 32]}
+            return corrupt(height, result) if corrupt else result
+        return await original(method, params)
+
+    app.base.call = timed_block
+    return calls
+
+
+@pytest.mark.parametrize("offset, expected", [(0, 0), (9, 0), (10, 3), (19, 3), (20, 4), (999, 4)])
+async def test_scan_utc_cutoff_includes_all_blocks_with_the_same_second(setup_service, offset, expected):
+    app, state = setup_service
+    state["logs"] = []
+    genesis = 1_700_000_000
+    calls = time_chain(app, state, [genesis + value for value in (0, 10, 10, 10, 20)])
+    result = await app.scan(WALLET, blocks=2, end_time=utc_cutoff(genesis + offset))
+    assert result["to_block"] == expected and result["from_block"] == max(0, expected - 1)
+    assert utc_cutoff(genesis + offset) in result["coverage"]
+    assert "fixed range" in result["coverage"] and "previously indexed" not in result["coverage"]
+    assert len(calls) <= 8
+
+
+@pytest.mark.parametrize("value", ["2023-11-14 22:13", "2023-11-14T22:13", "2023-11-14T22:13Z",
+                                     "2023-11-14T22:13:00", "2023-11-14T22:13:00Z"])
+async def test_scan_accepts_only_documented_utc_formats(setup_service, value):
+    app, state = setup_service
+    state["logs"] = []
+    time_chain(app, state, [1_699_999_900, 1_700_000_000])
+    result = await app.scan(WALLET, blocks=1, end_time=value)
+    assert result["to_block"] == 0 and "2023-11-14T22:13:00Z" in result["coverage"]
+
+
+@pytest.mark.parametrize("value", ["", "now", "2023-11-14", "2023-11-14 22:13:20", "2023-11-14T22:13:20+00:00",
+                                     "2023-11-14T22:13:20.1Z", "2023-02-29T22:13Z", "2023-11-14T24:00Z",
+                                     " 2023-11-14T22:13Z", "2023-11-14T22:13Z\n", "x" * 10000, 123])
+async def test_invalid_time_cutoffs_fail_before_rpc(setup_service, value):
+    app, _ = setup_service
+
+    async def no_rpc(*args):
+        pytest.fail("Invalid cutoff reached RPC.")
+
+    app.base.call = no_rpc
+    with pytest.raises(ValueError, match="UTC"):
+        await app.scan(WALLET, end_time=value)
+
+
+async def test_scan_time_and_height_are_mutually_exclusive(setup_service):
+    app, _ = setup_service
+    with pytest.raises(ValueError, match="either|both|exclusive"):
+        await app.scan(WALLET, end_block=100, end_time="2023-11-14T22:13Z")
+
+
+@pytest.mark.parametrize("patch", [{"number": "0xff"}, {"number": None}, {"timestamp": None},
+                                  {"timestamp": "private-provider-data"}, {"hash": "bad"}])
+async def test_time_lookup_rejects_malformed_provider_headers(setup_service, patch):
+    app, state = setup_service
+    state["logs"] = []
+    time_chain(app, state, [1_700_000_000 + value for value in range(201)],
+               corrupt=lambda height, block: block | patch)
+    with pytest.raises(UpstreamError) as error:
+        await app.scan(WALLET, end_time=utc_cutoff(1_700_000_100))
+    assert "private-provider-data" not in str(error.value)
+
+
+async def test_pruned_time_history_uses_actual_earliest_block(setup_service):
+    app, state = setup_service
+    state["logs"] = []
+    genesis = 1_700_000_000
+    calls = time_chain(app, state, [genesis + height for height in range(201)], earliest=50)
+    result = await app.scan(WALLET, blocks=2, end_time=utc_cutoff(genesis + 51))
+    assert result["to_block"] == 51 and min(calls) == 50
+    with pytest.raises(ValueError, match="available source history|genesis"):
+        await app.scan(WALLET, end_time=utc_cutoff(genesis + 49))
+
+
+async def test_time_range_is_clamped_to_provider_floor_and_reported_partial(setup_service):
+    app, state = setup_service
+    state["logs"] = []
+    genesis = 1_700_000_000
+    time_chain(app, state, [genesis + height for height in range(201)], earliest=50)
+    result = await app.scan(WALLET, blocks=200, end_time=utc_cutoff(genesis + 51))
+    assert (result["from_block"], result["to_block"]) == (50, 51)
+    assert result["partial"] is True and "shortened" in result["coverage"]
+
+
+async def test_time_lookup_has_a_deadline_and_releases_read_slots(setup_service, monkeypatch):
+    app, _ = setup_service
+    original = app.base.call
+
+    async def stalled_header(method, params=None):
+        if method == "eth_getBlockByNumber":
+            await asyncio.Future()
+        return await original(method, params)
+
+    app.base.call = stalled_header
+    monkeypatch.setattr(service, "TIME_SEARCH_TIMEOUT_SECONDS", 0.01)
+    with pytest.raises(UpstreamError, match="timed out"):
+        await app.scan(WALLET, end_time="2023-11-14T22:13Z")
+    assert app._read_slots._value == 3
+
+
+async def test_time_lookup_rejects_nonmonotonic_sampled_timestamps(setup_service):
+    app, state = setup_service
+    genesis = 1_700_000_000
+    times = [genesis + height for height in range(201)]
+    times[100] = genesis + 999
+    time_chain(app, state, times)
+    with pytest.raises(UpstreamError, match="inconsistent"):
+        await app.scan(WALLET, end_time=utc_cutoff(genesis + 101))
+
+
+async def test_time_lookup_rejects_an_unbounded_source_head(setup_service):
+    app, state = setup_service
+    state["base_head"] = 2**64
+    with pytest.raises(UpstreamError, match="invalid source head"):
+        await app.scan(WALLET, end_time="2023-11-14T22:13Z")
+
+
+async def test_time_scan_uses_current_confirmations_and_fixed_database_range(setup_service):
+    app, state = setup_service
+    genesis = 1_700_000_000
+    app.ingest_logs([burn_log() | {"transactionHash": "0x" + "88" * 32, "blockNumber": "0xc8"}])
+    time_chain(app, state, [genesis + height for height in range(201)])
+    result = await app.scan(WALLET, blocks=2, end_time=utc_cutoff(genesis + 101))
+    row, = result["transfers"]
+    assert (result["from_block"], result["to_block"]) == (100, 101)
+    assert row["block_number"] == 100 and row["status"] == "ready" and row["source_confirmations"] == 101
 
 
 async def test_source_reorg_never_becomes_ready(setup_service):

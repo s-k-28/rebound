@@ -50,7 +50,7 @@ Set those variables to your own public address, the original burn hash and the d
 
 The local MCP server exposes discovery, inspection, readiness and unsigned preparation to Codex and other MCP clients. [MCP setup](docs/MCP.md)
 
-Use **History options** in the browser or `--end-block` in the CLI to revisit a fixed source block window. The fixed range includes only burns in that window. Transfer status still reflects current chain state. When Circle supplies a destination transaction hash for a completed transfer, Rebound links to Arc after checking the successful receipt and its matching CCTP event.
+Use **History options** to end an address scan at a Base Sepolia block or a UTC time. Choose a time after the transfer. Rebound resolves it to the latest available block at or before that time and scans backward by the selected number of blocks. The result reports the exact blocks searched, and transfer status reflects current chain state. When Circle supplies a destination transaction hash for a completed transfer, Rebound links to Arc after checking the successful receipt and its matching CCTP event. [Base block API](https://docs.base.org/base-chain/api-reference/ethereum-json-rpc-api/eth_getBlockByNumber)
 
 **Refresh this transfer** rechecks the selected source receipt, matching Circle message and Arc nonce without rerunning the wallet scan. **Copy evidence** copies the public transfer identifiers, amounts, verification time and receipt links for a support ticket or demo.
 
@@ -64,6 +64,12 @@ For a real Base Sepolia backfill, select **Check a live sample** or scan the con
 
 ```bash
 uv run python -m rebound.cli scan 0x395809d8da4a70145d5060448070a15367df722c --blocks 200 --end-block 61175721
+```
+
+The same transfer can be found from a UTC time after the burn. A time without seconds ends at the start of that minute.
+
+```bash
+uv run python -m rebound.cli scan 0x395809d8da4a70145d5060448070a15367df722c --blocks 200 --end-time 2026-11-20T06:44Z
 ```
 
 The [validation notes](docs/VALIDATION.md#reproduce-the-read-only-check) include an independent historical case.

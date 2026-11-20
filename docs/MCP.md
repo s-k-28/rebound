@@ -12,12 +12,14 @@ uv run python -m rebound.mcp
 
 | Tool | Wraps | Returns |
 |---|---|---|
-| `find_unfinished_transfers(wallet, blocks=2000, end_block?)` | `RecoveryService.scan` | Every supported transfer for the address with status, amount, fixed recipient, `next_step`, block coverage and a `partial` flag |
+| `find_unfinished_transfers(wallet, blocks=2000, end_block?, end_time?)` | `RecoveryService.scan` | Matching transfers with status, amount, fixed recipient, `next_step`, exact block coverage and a `partial` flag |
 | `inspect_transfer(tx_hash, log_index?)` | `inspect_transaction` | Fresh verification of one burn receipt; use it to poll a waiting transfer |
 | `prepare_recovery(tx_hash, log_index, caller)` | `prepare` | The **unsigned** Arc `receiveMessage` transaction, review fields, gas quote and warning |
 | `check_readiness()` | `readiness` | Base Sepolia, Circle fee route and Arc Testnet provider status |
 
 Each result has a short text summary and the same data as `structuredContent` that matches the tool's `outputSchema`. Input schemas use the same address/hash patterns and bounds as the HTTP API (`blocks` 1–50,000, `log_index` 0–100,000).
+
+For a historical lookup, provide either `end_block` or a UTC `end_time` such as `2026-11-20T06:44Z`. The tool scans backward from the resolved block and reports the range covered by the provider.
 
 ```text
 agent restarts with only its wallet address
