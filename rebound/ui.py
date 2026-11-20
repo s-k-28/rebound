@@ -1,8 +1,10 @@
 """Python/Flutter transfer inbox; financial state is supplied by RecoveryService."""
 import json
+import re
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import flet as ft
 
@@ -23,6 +25,7 @@ MINT = "#C9E8D8"
 LIVE_SAMPLE_WALLET = "0x41f7337769003aec9b0b20789403f8c741d7faad"
 LIVE_SAMPLE_END_BLOCK = 61_125_511
 LIVE_SAMPLE_BLOCKS = 200
+CASE_PATH = re.compile(r"/transfer/(0x[0-9a-fA-F]{64})/([0-9]{1,8})/?", re.ASCII)
 
 STATE_COPY = {
     "ready": ("Ready to finish", "A signed message is available. Rebound will recheck it before preparing the destination mint.", BLUE, ft.Icons.NORTH_EAST_ROUNDED),
@@ -107,7 +110,8 @@ class InboxState:
                 "ready": sum(item["status"] == "ready" for item in self.transfers),
                 "completed": sum(item["status"] == "completed" for item in self.transfers)}
 
-    async def scan(self, service: Any, search: str, blocks: int, end_block: str = "", *, mode: str = "wallet") -> None:
+    async def scan(self, service: Any, search: str, blocks: int, end_block: str = "", *,
+                   mode: str = "wallet", log_index: int | None = None) -> None:
         self.busy = True
         self.example = False
         self.scanned = False
@@ -122,7 +126,8 @@ class InboxState:
         self.query = ""
         try:
             if mode == "transaction":
-                result = await service.inspect_transaction(hash32(search.strip()))
+                options = {"log_index": log_index} if log_index is not None else {}
+                result = await service.inspect_transaction(hash32(search.strip()), **options)
             elif mode == "stream":
                 self.wallet = address(search.strip())
                 result = await service.scan_stream(self.wallet)
@@ -589,6 +594,8 @@ class InboxUI:
                 self.value_line("Checked at (UTC)", item["checked_at"].replace("T", " ").removesuffix("+00:00")),
                 ft.TextButton("Copy evidence", icon=ft.Icons.CONTENT_COPY_ROUNDED, on_click=self.copy_evidence),
             ])
+            if self.case_link(item):
+                evidence_controls.append(ft.TextButton("Copy live case link", icon=ft.Icons.LINK_ROUNDED, on_click=self.copy_case_link))
         evidence = ft.ExpansionTile(title=self.text("Transfer evidence", 12, INK, ft.FontWeight.W_600),
             controls=[ft.Container(ft.Column(evidence_controls, spacing=16),
                         padding=ft.Padding.symmetric(horizontal=18, vertical=12))],
@@ -624,6 +631,21 @@ class InboxUI:
             fields.append(f"Verified Arc receipt: {item['destination_url']}")
         await self.clipboard.set("\n".join(fields))
         self.page.show_dialog(ft.SnackBar(content=self.text("Transfer evidence copied", color="#FFFFFF")))
+
+    def case_link(self, item: dict) -> str | None:
+        page_url = urlsplit(getattr(self.page, "url", "") or "")
+        scheme = {"ws": "http", "wss": "https", "http": "http", "https": "https"}.get(page_url.scheme)
+        if scheme is None or not page_url.netloc or item.get("example"):
+            return None
+        case_path = f"{page_url.path.rstrip('/')}/transfer/{item['tx_hash']}/{item['log_index']}"
+        return urlunsplit((scheme, page_url.netloc, case_path, "", ""))
+
+    async def copy_case_link(self, _=None) -> None:
+        item = self.state.selected
+        link = self.case_link(item) if item else None
+        if link:
+            await self.clipboard.set(link)
+            self.page.show_dialog(ft.SnackBar(content=self.text("Live case link copied", color="#FFFFFF")))
 
     def search(self, _=None):
         self.state.query = self.search_input.value or ""
@@ -718,13 +740,14 @@ class InboxUI:
         content = ft.Column([note, link], spacing=8) if self.narrow else ft.Row([note, link], spacing=16)
         return ft.Container(content, padding=ft.Padding.only(bottom=20))
 
-    async def scan(self, _=None, *, mode: str = "wallet") -> None:
+    async def scan(self, _=None, *, mode: str = "wallet", log_index: int | None = None) -> None:
         if self.state.busy:
             return
         self.state.busy = True
         self.render()
         search = self.tx_input.value if mode == "transaction" else self.wallet_input.value or self.state.wallet
-        await self.state.scan(self.service, search or "", int(self.history.value or "2000"), self.end_block.value or "", mode=mode)
+        await self.state.scan(self.service, search or "", int(self.history.value or "2000"),
+                              self.end_block.value or "", mode=mode, log_index=log_index)
         self.render()
 
     async def scan_index(self, _=None) -> None:
@@ -742,6 +765,25 @@ class InboxUI:
 
     async def inspect_transaction(self, _=None) -> None:
         await self.scan(mode="transaction")
+
+    async def open_case(self, route: str) -> None:
+        if not route.startswith("/transfer/"):
+            return
+        path = urlsplit(route).path
+        self.show_transaction = True
+        match = CASE_PATH.fullmatch(path)
+        if match is None:
+            self.state.error = "This case link is incomplete. Search using the original Base Sepolia transaction hash."
+            self.render()
+            return
+        tx_hash, index = match.groups()
+        self.tx_input.value = tx_hash.lower()
+        state = self.state
+        await self.scan(mode="transaction", log_index=int(index))
+        if self.state is state and len(state.transfers) == 1:
+            item = state.transfers[0]
+            if (item["tx_hash"], item["log_index"]) == (tx_hash.lower(), int(index)):
+                self.inspect(item)
 
     async def refresh_transfer(self, _=None) -> None:
         state, item = self.state, self.state.selected
@@ -854,5 +896,7 @@ class InboxUI:
 def build_main(service):
     """Return the async page entrypoint expected by flet.fastapi.app()."""
     async def main(page: ft.Page):
-        InboxUI(page, service).install()
+        ui = InboxUI(page, service)
+        ui.install()
+        await ui.open_case(page.route)
     return main

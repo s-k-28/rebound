@@ -47,6 +47,8 @@ Use **History options** in the browser or `--end-block` in the CLI to revisit a 
 
 **Refresh this transfer** rechecks the selected source receipt, matching Circle message and Arc nonce without rerunning the wallet scan. **Copy evidence** copies the public transfer identifiers, amounts, verification time and receipt links for a support ticket or demo.
 
+**Copy live case link** opens the exact source transaction and event index on the same Rebound deployment. The recipient of the link gets a fresh chain check.
+
 ### Complete a transfer locally
 
 For an eligible **testnet** transfer, use a throwaway testnet account with destination gas:

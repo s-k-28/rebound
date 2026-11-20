@@ -66,6 +66,33 @@ async def test_refresh_keeps_selected_transfer_visible_after_completion(monkeypa
     assert app.state.prepared is None
 
 
+async def test_shared_case_rechecks_one_public_source_event(monkeypatch):
+    tx_hash = "0x" + "aa" * 32
+    item = {"key": "case", "tx_hash": tx_hash, "log_index": 4, "status": "completed"}
+
+    class Page:
+        url = "wss://rebound.example/?wallet=unrelated"
+
+    class CaseService:
+        calls = []
+
+        async def inspect_transaction(self, source_hash, *, log_index):
+            self.calls.append((source_hash, log_index))
+            return {"transfers": [item], "coverage": "One source receipt"}
+
+    service = CaseService()
+    app = ui.InboxUI(Page(), service)
+    monkeypatch.setattr(app, "render", lambda: None)
+    await app.open_case("/transfer/malformed/4")
+    assert service.calls == []
+    assert "case link is incomplete" in app.state.error
+    await app.open_case(f"/transfer/{tx_hash}/4")
+    assert service.calls == [(tx_hash, 4)]
+    assert app.state.selected is item
+    assert app.case_link(item) == f"https://rebound.example/transfer/{tx_hash}/4"
+    assert app.case_link(item | {"example": True}) is None
+
+
 def test_attention_filter_excludes_completed_but_preserves_waiting():
     state = ui.InboxState()
     state.load_examples()
