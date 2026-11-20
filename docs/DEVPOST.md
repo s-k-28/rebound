@@ -68,6 +68,8 @@ Upload in this order. Images 1 to 5 and 7 use live testnet data. Image 6 is synt
 
 | Field | Draft |
 |---|---|
+| Project name | Rebound |
+| Team | Siddartha Kodithyala, Anay Goyal, Areeb Hirani, Parth Patel |
 | Main track | DeFi and Onchain Applications |
 | Chain award | Best Use of Arc |
 | Repository | [s-k-28/rebound](https://github.com/s-k-28/rebound) |
