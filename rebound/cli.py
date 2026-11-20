@@ -6,7 +6,6 @@ service preparation and explicit terminal confirmation; it never burns USDC.
 
 import argparse
 import asyncio
-import getpass
 import json
 import sqlite3
 import sys
@@ -28,8 +27,10 @@ from rebound.protocol import (
     usdc,
 )
 from rebound.service import arc_gas_quote
+from rebound.terminal import read_hidden_key
 
 ARC_CHAIN_ID = 5042002
+RECEIPT_TIMEOUT_SECONDS = 60
 
 
 def integer(value: str | int) -> int:
@@ -75,7 +76,7 @@ async def recover_transfer(
     caller: str,
     *,
     max_fee: Decimal = Decimal("0.1"),
-    read_key: Callable = getpass.getpass,
+    read_key: Callable = read_hidden_key,
     confirm: Callable = input,
     emit: Callable = print,
     sleep: Callable = asyncio.sleep,
@@ -107,9 +108,9 @@ async def recover_transfer(
         emit("Cancelled; no signing key requested and no transaction sent.")
         return {"status": "cancelled"}
 
+    key = read_key("Throwaway Arc Testnet private key (hidden; never saved): ")
     try:
-        key = read_key("Throwaway Arc Testnet private key (hidden; never saved): ").strip()
-        account = Account.from_key(key)
+        account = Account.from_key(key.strip())
     except (ValueError, TypeError):
         raise ValueError("The local signing key is invalid.") from None
     finally:
@@ -157,35 +158,32 @@ async def recover_transfer(
         return {"status": "broadcast_unknown", "tx_hash": local_hash}
 
     emit("Submitted once. Waiting up to 60 seconds for a destination receipt.")
-    for attempt in range(13):
-        try:
-            receipt = await service.arc.call("eth_getTransactionReceipt", [local_hash])
-        except Exception:
-            emit(
-                "Receipt lookup is unavailable. Check the destination hash before another attempt."
-            )
-            return {"status": "submitted", "tx_hash": local_hash}
-        if receipt:
-            if hash32(receipt.get("transactionHash", "")) != local_hash:
-                raise ValueError("Destination receipt does not match the signed transaction.")
-            if integer(receipt.get("status", 0)) != 1:
-                emit(
-                    "Destination transaction reverted; gas may have been spent. Re-diagnose the original burn."
-                )
-                return {"status": "reverted", "tx_hash": local_hash, "receipt": receipt}
-            if (
-                str(receipt.get("to", "")).lower() != TRANSMITTER
-                or str(receipt.get("from", "")).lower() != caller
-                or not matches_mint_receipt(receipt, local_hash, raw_message, message)
-            ):
-                emit(
-                    "Receipt confirmed but the expected mint event was not verified. Inspect the transaction."
-                )
-                return {"status": "receipt_unverified", "tx_hash": local_hash, "receipt": receipt}
-            emit(f"Destination mint confirmed: https://explorer.testnet.arc.io/tx/{local_hash}")
-            return {"status": "completed", "tx_hash": local_hash, "receipt": receipt, "nonce": message.nonce}
-        if attempt < 12:
-            await sleep(5)
+    try:
+        async with asyncio.timeout(RECEIPT_TIMEOUT_SECONDS):
+            for attempt in range(13):
+                receipt = await service.arc.call("eth_getTransactionReceipt", [local_hash])
+                if receipt:
+                    break
+                if attempt < 12:
+                    await sleep(5)
+    except Exception:
+        emit("Receipt lookup did not finish. Check the destination hash before another attempt.")
+        return {"status": "submitted", "tx_hash": local_hash}
+    if receipt:
+        if hash32(receipt.get("transactionHash", "")) != local_hash:
+            raise ValueError("Destination receipt does not match the signed transaction.")
+        if integer(receipt.get("status", 0)) != 1:
+            emit("Destination transaction reverted; gas may have been spent. Re-diagnose the original burn.")
+            return {"status": "reverted", "tx_hash": local_hash, "receipt": receipt}
+        if (
+            str(receipt.get("to", "")).lower() != TRANSMITTER
+            or str(receipt.get("from", "")).lower() != caller
+            or not matches_mint_receipt(receipt, local_hash, raw_message, message)
+        ):
+            emit("Receipt confirmed but the expected mint event was not verified. Inspect the transaction.")
+            return {"status": "receipt_unverified", "tx_hash": local_hash, "receipt": receipt}
+        emit(f"Destination mint confirmed: https://explorer.testnet.arc.io/tx/{local_hash}")
+        return {"status": "completed", "tx_hash": local_hash, "receipt": receipt, "nonce": message.nonce}
     emit("Still awaiting a receipt. Keep this hash and check it before any retry.")
     return {"status": "submitted", "tx_hash": local_hash}
 
