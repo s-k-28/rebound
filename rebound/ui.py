@@ -393,10 +393,11 @@ class InboxUI:
         children = []
         visible = self.state.visible_transfers()
         if visible:
-            children.append(ft.Container(ft.Row([
-                self.text("Transfer", 10, MUTED, expand=True),
-                self.text("Amount", 10, MUTED, width=100), self.text("State", 10, MUTED, width=170),
-            ]), padding=ft.Padding.symmetric(horizontal=20, vertical=10), bgcolor="#F8FAF7"))
+            if not self.narrow:
+                children.append(ft.Container(ft.Row([
+                    self.text("Transfer", 10, MUTED, expand=True),
+                    self.text("Amount", 10, MUTED, width=100), self.text("State", 10, MUTED, width=170),
+                ]), padding=ft.Padding.symmetric(horizontal=20, vertical=10), bgcolor="#F8FAF7"))
             children.extend(self.transfer_row(item) for item in visible)
         else:
             empty_title = "No matching transfers" if self.state.scanned else "A fresh start for unfinished transfers."
