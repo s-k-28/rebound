@@ -54,6 +54,8 @@ Use **History options** in the browser or `--end-block` in the CLI to revisit a 
 
 **Refresh this transfer** rechecks the selected source receipt, matching Circle message and Arc nonce without rerunning the wallet scan. **Copy evidence** copies the public transfer identifiers, amounts, verification time and receipt links for a support ticket or demo.
 
+When a completed transfer lacks a receipt link, paste the Arc transaction hash under **Verify a submitted Arc receipt**. Rebound checks that the canonical Arc receipt contains the original mint message and nonce, then adds its verified link.
+
 **Copy live case link** opens the exact source transaction and event index on the same Rebound deployment. The recipient of the link gets a fresh chain check.
 
 Open `/demo` or search for `0x05af7613449b84f2a02893d35e6cdee479404ce8` to use the synthetic wallet. **Show simulated Stream delivery** opens an example of the Stream discovery workflow. This demo uses local fixture data and cannot prepare a transaction.
