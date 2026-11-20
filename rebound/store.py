@@ -14,7 +14,7 @@ from rebound.protocol import Burn, decode_burn
 class IndexedBurn:
     burn: Burn
     from_stream: bool
-    # Seconds since the epoch when this server first received the event from the Stream.
+    # First signed delivery time for this block, or first unsigned time until upgraded.
     received_at: int | None = None
     # True only when a delivery carried a valid QuickNode signature. A delivery accepted with
     # the local shared secret is a Stream-endpoint test, not evidence that QuickNode sent it.
@@ -62,8 +62,15 @@ class CandidateStore:
                 depositor=excluded.depositor, recipient=excluded.recipient,
                 block_number=excluded.block_number, payload=excluded.payload,
                 stream_block_hash=COALESCE(excluded.stream_block_hash, candidates.stream_block_hash),
-                stream_received_at=COALESCE(candidates.stream_received_at, excluded.stream_received_at),
-                stream_signed=CASE WHEN candidates.stream_signed = 1 OR excluded.stream_signed = 1 THEN 1
+                stream_received_at=CASE
+                    WHEN excluded.stream_block_hash IS NULL THEN candidates.stream_received_at
+                    WHEN candidates.stream_block_hash IS NOT excluded.stream_block_hash THEN excluded.stream_received_at
+                    WHEN excluded.stream_signed = 1 AND candidates.stream_signed IS NOT 1 THEN excluded.stream_received_at
+                    ELSE COALESCE(candidates.stream_received_at, excluded.stream_received_at) END,
+                stream_signed=CASE
+                    WHEN excluded.stream_block_hash IS NULL THEN candidates.stream_signed
+                    WHEN candidates.stream_block_hash IS NOT excluded.stream_block_hash THEN excluded.stream_signed
+                    WHEN candidates.stream_signed = 1 OR excluded.stream_signed = 1 THEN 1
                                    ELSE COALESCE(excluded.stream_signed, candidates.stream_signed) END""",
                 ((burn.tx_hash, burn.log_index, burn.depositor, burn.mint_recipient,
                   burn.block_number, json.dumps(log), burn.block_hash if from_stream else None, received_at,
