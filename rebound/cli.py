@@ -8,6 +8,7 @@ import argparse
 import asyncio
 import getpass
 import json
+import sqlite3
 import sys
 from collections.abc import Callable
 from decimal import Decimal, InvalidOperation
@@ -177,7 +178,7 @@ async def recover_transfer(
                 )
                 return {"status": "receipt_unverified", "tx_hash": local_hash, "receipt": receipt}
             emit(f"Destination mint confirmed: https://explorer.testnet.arc.io/tx/{local_hash}")
-            return {"status": "completed", "tx_hash": local_hash, "receipt": receipt}
+            return {"status": "completed", "tx_hash": local_hash, "receipt": receipt, "nonce": message.nonce}
         if attempt < 12:
             await sleep(5)
     emit("Still awaiting a receipt. Keep this hash and check it before any retry.")
@@ -244,9 +245,15 @@ async def run(args: argparse.Namespace) -> dict:
             cap = Decimal(args.max_gas_usdc)
         except InvalidOperation:
             raise ValueError("--max-gas-usdc must be a positive decimal amount.") from None
-        return await recover_transfer(
+        result = await recover_transfer(
             service, args.tx_hash, args.log_index, args.caller, max_fee=cap
         )
+        if result["status"] == "completed":
+            try:
+                service.store.remember_mint(hash32(args.tx_hash), args.log_index, result["nonce"], result["tx_hash"])
+            except (OSError, sqlite3.Error):
+                print("The verified mint succeeded, but the local inbox could not save its receipt hash.", file=sys.stderr)
+        return result
 
 
 def main() -> int:

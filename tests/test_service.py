@@ -132,7 +132,8 @@ async def test_prepare_rechecks_nonce_instead_of_trusting_previous_ready(setup_s
 
 
 @pytest.mark.parametrize("receipt_variant", ["matching", "wrong_nonce", "wrong_body", "reverted", "missing"])
-async def test_completed_links_only_to_a_matching_arc_receipt(setup_service, receipt_variant):
+@pytest.mark.parametrize("hint_from", ["circle", "local"])
+async def test_completed_links_only_to_a_matching_arc_receipt(setup_service, receipt_variant, hint_from):
     from rebound import protocol
     from tests.test_protocol import word_address
 
@@ -140,9 +141,14 @@ async def test_completed_links_only_to_a_matching_arc_receipt(setup_service, rec
     state["used"] = True
     tx_hash = "0x" + "ae" * 32
     raw = message_hex()
-    state["messages"] = [{"status": "complete", "message": raw, "attestation": "0x" + "11" * 65,
-                          "destinationMintTxHash": tx_hash}]
     message = protocol.decode_message(raw)
+    row = {"status": "complete", "message": raw, "attestation": "0x" + "11" * 65}
+    if hint_from == "circle":
+        row["destinationMintTxHash"] = tx_hash
+    else:
+        burn = protocol.decode_burn(burn_log())
+        app.store.remember_mint(burn.tx_hash, burn.log_index, message.nonce, tx_hash)
+    state["messages"] = [row]
     body = bytes.fromhex(raw[2:])[148:]
     receipt = {"status": "0x0" if receipt_variant == "reverted" else "0x1", "transactionHash": tx_hash,
                "logs": [{"address": protocol.TRANSMITTER,

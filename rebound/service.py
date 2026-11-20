@@ -360,6 +360,10 @@ class RecoveryService:
                 status = destination.status
                 if status == "completed":
                     row["destination_url"] = await self._destination_receipt_url(receipt_hint, raw, message)
+                    if row["destination_url"] is None:
+                        local_hint = self.store.local_mint(burn, message.nonce)
+                        if local_hint and local_hint != receipt_hint:
+                            row["destination_url"] = await self._destination_receipt_url(local_hint, raw, message)
                 if status == "ready":
                     if source_head is None:
                         source_head = quantity(await self.base.call("eth_blockNumber"))

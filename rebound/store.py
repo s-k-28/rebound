@@ -30,6 +30,10 @@ class CandidateStore:
                 db.execute("ALTER TABLE candidates ADD COLUMN stream_block_hash TEXT")
             db.execute("CREATE INDEX IF NOT EXISTS by_depositor ON candidates(depositor)")
             db.execute("CREATE INDEX IF NOT EXISTS by_recipient ON candidates(recipient)")
+            db.execute("""CREATE TABLE IF NOT EXISTS local_mints (
+                source_hash TEXT NOT NULL, log_index INTEGER NOT NULL,
+                nonce TEXT NOT NULL, destination_hash TEXT NOT NULL,
+                PRIMARY KEY(source_hash, log_index, nonce))""")
             db.commit()
 
     def save_many(self, entries: list[tuple[Burn, dict]], *, from_stream: bool = False) -> None:
@@ -68,3 +72,19 @@ class CandidateStore:
             except (ValueError, TypeError):
                 continue
         return burns
+
+    def remember_mint(self, source_hash: str, log_index: int, nonce: str, destination_hash: str) -> None:
+        with closing(sqlite3.connect(self.path, timeout=10)) as db:
+            db.execute("""INSERT INTO local_mints (source_hash, log_index, nonce, destination_hash) VALUES (?, ?, ?, ?)
+                ON CONFLICT(source_hash, log_index, nonce) DO UPDATE SET destination_hash=excluded.destination_hash""",
+                (source_hash, log_index, nonce, destination_hash))
+            db.commit()
+
+    def local_mint(self, burn: Burn, nonce: str) -> str | None:
+        try:
+            with closing(sqlite3.connect(self.path)) as db:
+                row = db.execute("SELECT destination_hash FROM local_mints WHERE source_hash=? AND log_index=? AND nonce=?",
+                                 (burn.tx_hash, burn.log_index, nonce)).fetchone()
+        except sqlite3.Error:
+            return None  # Tracking a receipt is optional for a verified consumed nonce.
+        return row[0] if row else None
