@@ -85,6 +85,19 @@ If a controlled burn is ready on pitch day, use 1:20–2:25 for the local review
 7. Attempt preparation again for the **same source transaction hash and log index**. Capture the completed-state refusal before another transaction can be prepared. This is a state check, not a second burn or another broadcast.
 8. Separately show the clearly labeled restricted-caller example and explain why Rebound refuses to bypass the restriction.
 
+## QuickNode Streams walkthrough
+
+Use this sequence to show Stream-index discovery and its evidence limits. Public preview viewers need only a public testnet address, with no credentials, wallet connection or QuickNode account. Never show a key, webhook token, private dashboard URL or RPC credential.
+
+1. Open the app in a fresh browser session with no saved history. Open **QuickNode walkthrough** and show its separate checks. Independent provider observation remains Pending until the matching provider delivery record is available.
+2. Select **Use this wallet**, which fills only the public walkthrough address.
+3. Select **Search Stream index**. State that this search reads the Stream index and does not scan source history.
+4. Open a matching transfer, if present. Show **Authenticated Stream payload**, the Base Sepolia block number, **View original burn**, and the separate source, payload-authentication and transfer-status checks. Explain that a locally signed replay can pass the same authentication check.
+5. If the operator independently observed a real provider delivery, show a redacted delivery record and match its event identity to the endpoint payload and canonical source receipt. This evidence is separate from the signature check. Public viewers should not need access to a private dashboard. Until this record exists, state that provider delivery is Pending.
+6. Reopen **QuickNode walkthrough** to show authentication, wallet-only discovery and the Arc mint separately from provider observation.
+
+If the label reads **Stream endpoint (no QuickNode signature)** or **Simulated Stream delivery**, present it as an endpoint test or synthetic example. **Authenticated Stream payload** also does not by itself establish provider origin. Preserve the distinction between the recorded QuickNode **Send Payload** setup test, the local signed replay of the controlled burn and independently observed delivery from an actual Stream.
+
 ## Final sign-off checklist
 
 The first five checks were verified in the [controlled testnet run](LIVE-RECOVERY.md).

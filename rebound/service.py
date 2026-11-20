@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -15,6 +16,22 @@ from rebound.clients import Circle, RangeLimitError, Rpc, UpstreamError, quantit
 from rebound.store import CandidateStore, IndexedBurn
 
 MIN_RECOVERY_CONFIRMATIONS = 12
+BLOCK_TIME_CACHE_SIZE = 4096
+TIME_SEARCH_TIMEOUT_SECONDS = 30
+
+
+def _parse_utc_cutoff(value: str) -> tuple[int, str]:
+    if (not isinstance(value, str) or len(value) > 20 or not re.fullmatch(
+            # The hour is limited to 00-23 here. Python 3.14's fromisoformat reads 24:00 as midnight
+            # of the next day, which would silently move the cutoff by a day.
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}(?: (?:[01][0-9]|2[0-3]):[0-9]{2}"
+            r"|T(?:[01][0-9]|2[0-3]):[0-9]{2}(?::[0-9]{2})?Z?)", value)):
+        raise ValueError("Use a UTC cutoff as YYYY-MM-DD HH:MM or YYYY-MM-DDTHH:MM[:SS][Z].")
+    try:
+        cutoff = datetime.fromisoformat(value.removesuffix("Z")).replace(tzinfo=UTC)
+    except ValueError:
+        raise ValueError("The UTC cutoff is not a valid date and time.") from None
+    return int(cutoff.timestamp()), cutoff.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 @dataclass(frozen=True)
@@ -25,6 +42,9 @@ class Settings:
     database: str = "data/rebound.sqlite3"
     stream_secret: str = ""
     stream_security_token: str = ""
+    # Public address used by the QuickNode walkthrough. The default is the testnet
+    # sample wallet documented in docs/LIVE-RECOVERY.md.
+    quicknode_demo_wallet: str = "0x395809d8da4a70145d5060448070a15367df722c"
     # Off until a real wallet-extension run on a funded throwaway account passes.
     browser_wallet: bool = False
 
@@ -33,6 +53,8 @@ class Settings:
             parsed = urlsplit(endpoint)
             if parsed.scheme not in ("http", "https") or not parsed.netloc:
                 raise ValueError("Upstream endpoints must be valid HTTP(S) URLs.")
+        if self.quicknode_demo_wallet:
+            p.address(self.quicknode_demo_wallet)
 
     @classmethod
     def from_env(cls):
@@ -43,6 +65,8 @@ class Settings:
             database=os.getenv("REBOUND_DB", cls.database),
             stream_secret=os.getenv("REBOUND_STREAM_SECRET", ""),
             stream_security_token=os.getenv("REBOUND_STREAM_SECURITY_TOKEN", ""),
+            # An empty value (as in .env.example) means "use the default", not "no wallet".
+            quicknode_demo_wallet=os.getenv("REBOUND_QUICKNODE_DEMO_WALLET") or cls.quicknode_demo_wallet,
             browser_wallet=os.getenv("REBOUND_BROWSER_WALLET") == "1",
         )
 
@@ -120,6 +144,23 @@ class ArcGasQuote:
         return max(0, self.maximum_cost - self.balance)
 
 
+def _remember_block_time(times: dict[str, int] | None, block: dict) -> None:
+    """Keep a canonical block's timestamp, keyed by the block hash that commits to it."""
+    if times is None:
+        return
+    try:
+        block_hash = p.hash32(block.get("hash"))
+        timestamp = quantity(block.get("timestamp"))
+        # This optional display value must be representable on this platform.
+        # Invalid metadata must never change a transfer's proof or control state.
+        datetime.fromtimestamp(timestamp, UTC)
+        times[block_hash] = timestamp
+    except (ValueError, OverflowError, OSError, UpstreamError):
+        return
+    while len(times) > BLOCK_TIME_CACHE_SIZE:
+        times.pop(next(iter(times)))
+
+
 async def arc_gas_quote(rpc: Rpc, caller: str, gas_limit: int, *, block: str = "latest") -> ArcGasQuote:
     price, balance = await _gather_reads(
         rpc.call("eth_gasPrice"), rpc.call("eth_getBalance", [caller, block]),
@@ -130,7 +171,8 @@ async def arc_gas_quote(rpc: Rpc, caller: str, gas_limit: int, *, block: str = "
     return ArcGasQuote(price, gas_limit, quantity(balance))
 
 
-async def verify_arc_mint_receipt(rpc: Rpc, receipt: object, tx_hash: str, raw: str, message: p.Message) -> bool:
+async def verify_arc_mint_receipt(rpc: Rpc, receipt: object, tx_hash: str, raw: str, message: p.Message,
+                                  *, block_times: dict[str, int] | None = None) -> bool:
     """Match a mint to its canonical Arc block and original attested message."""
     if not isinstance(receipt, dict) or not p.matches_mint_receipt(receipt, tx_hash, raw, message):
         return False
@@ -141,6 +183,7 @@ async def verify_arc_mint_receipt(rpc: Rpc, receipt: object, tx_hash: str, raw: 
         if (not isinstance(block, dict) or p.hash32(block.get("hash")) != block_hash
                 or quantity(block.get("number")) != block_number):
             return False
+        _remember_block_time(block_times, block)
         transaction_index = quantity(receipt["transactionIndex"]) if "transactionIndex" in receipt else None
         transactions = block.get("transactions")
         if not isinstance(transactions, list):
@@ -189,6 +232,7 @@ class RecoveryService:
         self._readiness_lock = asyncio.Lock()
         self._readiness_cache: dict | None = None
         self._readiness_expires = 0.0
+        self._block_times: dict[str, int] = {}
 
     async def _verify_chain(self, rpc: Rpc, chain: int, contract: str):
         chain_id, code = await _gather_reads(
@@ -242,7 +286,7 @@ class RecoveryService:
             self._readiness_expires = time.monotonic() + (30 if ready else 5)
             return self._readiness_cache
 
-    def ingest_logs(self, logs: list[dict]) -> int:
+    def ingest_logs(self, logs: list[dict], *, signed: bool = False) -> int:
         if not isinstance(logs, list) or len(logs) > 5000:
             raise ValueError("Provide at most 5,000 event logs per ingestion request.")
         candidates = []
@@ -254,22 +298,99 @@ class RecoveryService:
                 candidates.append((burn, log))
             except (ValueError, KeyError, TypeError, AttributeError):
                 continue
-        self.store.save_many(candidates, from_stream=True)
+        self.store.save_many(candidates, from_stream=True, signed=signed)
         return len(candidates)
 
-    async def scan(self, wallet: str, blocks: int = 2000, *, end_block: int | None = None) -> dict:
+    async def _block_at_time(self, timestamp: int, latest: int) -> tuple[int, int]:
+        """Return the last block at the cutoff and this provider's readable floor."""
+        if not 0 <= latest < 2**64:
+            raise UpstreamError("Base Sepolia returned an invalid source head for time lookup.")
+        seen: dict[int, tuple[int, str]] = {}
+
+        async def header(tag: str, expected: int | None = None) -> tuple[int, int]:
+            try:
+                # One sequential read per admitted scan, like the chain check. Taking a read
+                # slot would queue this deadline behind another scan's bulk log reads.
+                block = await self.base.call("eth_getBlockByNumber", [tag, False])
+                if not isinstance(block, dict):
+                    raise ValueError
+                for field in ("number", "timestamp"):
+                    if (not isinstance(block.get(field), str) or len(block[field]) > 18
+                            or not re.fullmatch(r"0x(?:0|[1-9a-fA-F][0-9a-fA-F]{0,15})", block[field])):
+                        raise ValueError
+                number, seconds = quantity(block["number"]), quantity(block["timestamp"])
+                block_hash = p.hash32(block.get("hash"))
+                if (number > latest or (expected is not None and number != expected)
+                        or seconds > 253_402_300_799):
+                    raise ValueError
+                identity = (seconds, block_hash)
+                if number in seen and seen[number] != identity:
+                    raise ValueError
+                seen[number] = identity
+                return number, seconds
+            except (ValueError, TypeError, UpstreamError) as exc:
+                raise UpstreamError("Base Sepolia could not verify the requested time range. Its available source history may be limited; try another RPC or a more recent UTC cutoff.") from exc
+
+        _, head_time = await header(hex(latest), latest)
+        # 'earliest' is the readable retention floor on pruned RPCs, not always genesis.
+        floor, floor_time = await header("earliest")
+        if floor_time > head_time:
+            raise UpstreamError("Base Sepolia returned inconsistent block timestamps.")
+        if timestamp < floor_time:
+            first = datetime.fromtimestamp(floor_time, UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+            raise ValueError(f"The cutoff is before available source history, which starts at {first} (block {floor:,}).")
+        low, high, low_time, high_time = floor, latest, floor_time, head_time
+        if timestamp >= head_time:
+            low = latest
+        else:
+            # Upper-bound search: equal timestamps always move right, including every tie.
+            for _ in range(64):
+                if high - low <= 1:
+                    break
+                middle = (low + high) // 2
+                _, middle_time = await header(hex(middle), middle)
+                if not low_time <= middle_time <= high_time:
+                    raise UpstreamError("Base Sepolia returned inconsistent block timestamps.")
+                if middle_time <= timestamp:
+                    low, low_time = middle, middle_time
+                else:
+                    high, high_time = middle, middle_time
+            if high - low > 1:
+                raise UpstreamError("Base Sepolia time lookup exceeded its bounded search.")
+        # Re-read the final bracket so a changed boundary cannot silently move the cutoff.
+        _, selected_time = await header(hex(low), low)
+        if selected_time > timestamp:
+            raise UpstreamError("Base Sepolia could not establish the UTC cutoff.")
+        if low < latest:
+            _, following_time = await header(hex(low + 1), low + 1)
+            if following_time <= timestamp:
+                raise UpstreamError("Base Sepolia could not establish the latest block at the UTC cutoff.")
+        return low, floor
+
+    async def scan(self, wallet: str, blocks: int = 2000, *, end_block: int | None = None,
+                   end_time: str | None = None) -> dict:
         wallet = p.address(wallet)
         if not isinstance(blocks, int) or isinstance(blocks, bool) or not 1 <= blocks <= 50_000:
             raise ValueError("History must contain between 1 and 50,000 source blocks.")
         if end_block is not None and (type(end_block) is not int or end_block < 0):
             raise ValueError("End block must be a non-negative block number.")
+        if end_block is not None and end_time is not None:
+            raise ValueError("Choose either an end block or a UTC end time, not both.")
+        cutoff = _parse_utc_cutoff(end_time) if end_time is not None else None
         async with self._admit():
             await self._verify_chain(self.base, 84532, p.MESSENGER)
             latest = quantity(await self.base.call("eth_blockNumber"))
             if end_block is not None and end_block > latest:
                 raise ValueError(f"End block must be at or before Base Sepolia block {latest:,}.")
             end = latest if end_block is None else end_block
-            start = max(0, end - blocks + 1)
+            floor = 0
+            if cutoff is not None:
+                try:
+                    async with asyncio.timeout(TIME_SEARCH_TIMEOUT_SECONDS):
+                        end, floor = await self._block_at_time(cutoff[0], latest)
+                except TimeoutError as exc:
+                    raise UpstreamError("Base Sepolia UTC time lookup timed out. Try again or use an end block.") from exc
+            start = max(floor, end - blocks + 1)
             source_token = "0x" + "00" * 12 + p.USDC[2:]
 
             async def read_chunk(first: int, last: int):
@@ -305,35 +426,70 @@ class RecoveryService:
             size = self._log_chunk_size
             batches = await _gather_reads(*(read_chunk(first, min(first + size - 1, end)) for first in range(start, end + 1, size)))
             await asyncio.to_thread(self.store.save_many, [entry for batch in batches for entry in batch])
-            burns = self.store.candidates(wallet, block_range=(start, end) if end_block is not None else None)
+            fixed = end_block is not None or cutoff is not None
+            burns = self.store.candidates(wallet, block_range=(start, end) if fixed else None)
             transfers = await self._inspect_candidates(burns, latest)
-            indexed = ", plus previously indexed candidates" if end_block is None else " (fixed range)"
+            indexed = " (fixed range)" if fixed else ", plus previously indexed candidates"
+            shortened = cutoff is not None and start > max(0, end - blocks + 1)
+            cutoff_note = f" UTC cutoff {cutoff[1]} (latest block at or before)." if cutoff else ""
+            if shortened:
+                cutoff_note += " Range shortened to the provider's available source history."
             return {
                 "wallet": wallet, "from_block": start, "to_block": end,
-                "coverage": f"Base Sepolia blocks {start:,}–{end:,}{indexed}. Covers native USDC CCTP V2 burns to Arc.",
-                "partial": len(burns) > 100, "transfers": transfers,
+                "coverage": f"Base Sepolia blocks {start:,}–{end:,}{indexed}. Covers native USDC CCTP V2 burns to Arc.{cutoff_note}",
+                "partial": len(burns) > 100 or shortened, "transfers": transfers,
             }
 
     async def scan_stream(self, wallet: str) -> dict:
+        """Find a wallet's transfers from burns stored by the Stream endpoint.
+
+        Reads the persisted Stream index only. There is no source ``eth_getLogs``
+        history scan, so an empty result means nothing was delivered for this
+        address, not that no transfer exists. After discovery each burn is
+        rechecked against its source receipt, Circle's attestation and Arc.
+        """
         wallet = p.address(wallet)
         if not self.settings.stream_enabled:
-            raise ValueError("The Stream index is not enabled on this server.")
+            raise ValueError("QuickNode Streams ingestion is not enabled on this server.")
         async with self._admit():
             burns = self.store.candidates(wallet, stream_only=True)
             transfers = []
             if burns:
-                await self._verify_chain(self.base, 84532, p.MESSENGER)
-                latest = quantity(await self.base.call("eth_blockNumber"))
-                transfers = await self._inspect_candidates(burns, latest)
+                try:
+                    await self._verify_chain(self.base, 84532, p.MESSENGER)
+                    latest = quantity(await self.base.call("eth_blockNumber"))
+                    transfers = await self._inspect_candidates(burns, latest)
+                except UpstreamError as exc:
+                    count = min(len(burns), 100)
+                    raise UpstreamError(
+                        f"The Stream index has {count} matching burn{'s' if count != 1 else ''} for this address, "
+                        f"but Rebound could not finish verifying {'them' if count != 1 else 'it'}. {exc} Retry shortly."
+                    ) from exc
             return {"wallet": wallet, "from_block": None, "to_block": None, "partial": len(burns) > 100,
-                    "coverage": "Only received Stream events. The index may not cover all source blocks.",
+                    "source": "stream_index", "delivered": len(burns),
+                    "coverage": "Stream endpoint records for this address. Rebound did not scan Base Sepolia "
+                                "history. Block coverage is unknown.",
                     "transfers": transfers}
+
+    def stream_status(self, wallet: str) -> dict:
+        """What the Stream index holds for a wallet. Reads the index only, no RPC.
+
+        ``delivered`` counts indexed burns with an accepted HMAC. It measures
+        endpoint authentication. ``local`` counts shared-secret adapter records.
+        """
+        wallet = p.address(wallet)
+        summary = self.store.stream_summary(wallet) if self.settings.stream_enabled else {"signed": 0, "last_signed": None, "local": 0}
+        return {"wallet": wallet, "enabled": self.settings.stream_enabled, "delivered": summary["signed"],
+                "last_received": summary["last_signed"], "local": summary["local"]}
 
     async def _inspect_candidates(self, burns: list[IndexedBurn], source_head: int) -> list[dict]:
         async def inspect(candidate: IndexedBurn):
             async with self._read_slots:
                 row = await self.diagnose(candidate.burn, source_head=source_head)
                 row["discovery_source"] = "stream" if candidate.from_stream else "rpc"
+                if candidate.from_stream:
+                    row["stream_received_at"] = candidate.received_at
+                    row["stream_signed"] = candidate.signed
                 return row
 
         return await _gather_reads(*(inspect(candidate) for candidate in burns[:100]))
@@ -399,6 +555,7 @@ class RecoveryService:
             if (not isinstance(transactions, list) or transaction_index >= len(transactions)
                     or p.hash32(transactions[transaction_index]) != tx_hash):
                 raise SourceChanged("Source transaction is not at its canonical block position.")
+            _remember_block_time(self._block_times, block)
             logs = receipt["logs"]
             if not isinstance(logs, list):
                 raise ValueError("Invalid receipt logs.")
@@ -481,7 +638,18 @@ class RecoveryService:
             receipt = await self.arc.call("eth_getTransactionReceipt", [tx_hash])
         except (ValueError, UpstreamError):
             return None
-        return receipt if await verify_arc_mint_receipt(self.arc, receipt, tx_hash, attestation.raw, attestation.message) else None
+        verified = await verify_arc_mint_receipt(self.arc, receipt, tx_hash, attestation.raw, attestation.message,
+                                                 block_times=self._block_times)
+        return receipt if verified else None
+
+    def _block_time(self, block_hash: str) -> str | None:
+        timestamp = self._block_times.get(block_hash)
+        if timestamp is None:
+            return None
+        try:
+            return datetime.fromtimestamp(timestamp, UTC).isoformat(timespec="seconds")
+        except (ValueError, OverflowError, OSError):
+            return None
 
     async def _verified_arc_receipt(self, burn: p.Burn, attestation: Attestation) -> dict | None:
         hint = attestation.receipt_hint
@@ -570,6 +738,7 @@ class RecoveryService:
             "source_confirmations": None,
             "destination_block": None, "nonce_used": None, "expiration_block": None,
             "delivery_mode": None, "forward_state": None,
+            "burned_at": None, "minted_at": None,
         }
         if destination_hash is not None:
             row.update(submitted_destination_hash=destination_hash,
@@ -580,6 +749,7 @@ class RecoveryService:
             else:
                 self._match_receipt_burn(receipt_burns, burn.log_index, burn)
             row["source_verified"] = True
+            row["burned_at"] = self._block_time(burn.block_hash)
             if burn.destination_domain != 26:
                 raise ValueError("Unsupported destination route.")
             if source_head is None:
@@ -605,6 +775,7 @@ class RecoveryService:
                     receipt = await self._verified_arc_receipt(burn, attested)
                     if receipt is not None:
                         row["destination_url"] = f"{p.ARC_EXPLORER}/tx/{p.hash32(receipt['transactionHash'])}"
+                        row["minted_at"] = self._block_time(p.hash32(receipt["blockHash"]))
                     if destination_hash is not None:
                         submitted = receipt
                         if receipt is None or p.hash32(receipt["transactionHash"]) != destination_hash:
@@ -612,6 +783,8 @@ class RecoveryService:
                         if submitted is not None:
                             row.update(submitted_receipt_verified=True,
                                        submitted_receipt_url=f"{p.ARC_EXPLORER}/tx/{destination_hash}")
+                            if row["minted_at"] is None:
+                                row["minted_at"] = self._block_time(p.hash32(submitted["blockHash"]))
                 elif delivery_mode:
                     status = "managed_delivery"
                 elif status == "ready" and source_confirming:

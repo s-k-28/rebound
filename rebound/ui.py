@@ -2,7 +2,9 @@
 import asyncio
 import json
 import re
+import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -12,6 +14,14 @@ import flet as ft
 from rebound.clients import UpstreamError
 from rebound.examples import EXAMPLE_WALLET, example_stream_transfer, example_transfers
 from rebound.protocol import ZERO, address, hash32
+from rebound.quicknode import (
+    authenticated_stream_payload,
+    evidence_steps,
+    load_stream_record,
+    stream_facts,
+    walkthrough_checks,
+)
+from rebound.service import MIN_RECOVERY_CONFIRMATIONS
 
 # Ledger palette. See docs/DESIGN.md: ink means settled, the one accent means "act here",
 # amber means waiting and red means the record needs review.
@@ -39,6 +49,15 @@ LIVE_SAMPLE_WALLET = "0x395809d8da4a70145d5060448070a15367df722c"
 LIVE_SAMPLE_END_BLOCK = 61_175_721
 LIVE_SAMPLE_BLOCKS = 200
 CASE_PATH = re.compile(r"/transfer/(0x[0-9a-fA-F]{64})/([0-9]{1,8})/?", re.ASCII)
+HISTORY_WINDOWS = (200, 2000, 10_000, 50_000)
+WALLET_FORMAT = re.compile(r"0x[0-9a-fA-F]{40}", re.ASCII)
+HASH_FORMAT = re.compile(r"0x[0-9a-fA-F]{64}", re.ASCII)
+
+# The inspector rechecks one selected live transfer while it waits on Base or Circle.
+RECHECK_STATUSES = frozenset({"source_confirming", "awaiting_attestation"})
+RECHECK_SECONDS = 10
+RECHECK_LIMIT_SECONDS = 600
+UNFINISHED_STATUSES = frozenset({"ready", "awaiting_attestation", "source_confirming", "caller_required"})
 
 STATE_COPY = {
     "ready": ("Ready to finish", "A signed message is available. Rebound will recheck it before preparing the destination mint.", "action"),
@@ -85,6 +104,135 @@ def safe_error(exc: Exception) -> str:
     if isinstance(exc, (ValueError, UpstreamError)):
         return str(exc)
     return "The transfer could not be verified. Try again or use a narrower history range."
+
+
+def chain_time(value: object) -> datetime | None:
+    """Read a block timestamp supplied by RecoveryService. Never substitute a local time."""
+    if not isinstance(value, str):
+        return None
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return moment.astimezone(UTC) if moment.tzinfo else None
+
+
+def format_duration(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 120:
+        return f"{seconds} s"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes} min"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 24:
+        return f"{hours} h {minutes} min" if minutes else f"{hours} h"
+    days, hours = divmod(hours, 24)
+    return f"{days} d {hours} h" if hours else f"{days} d"
+
+
+def format_clock(moment: datetime, now: datetime) -> str:
+    """UTC time of day, with the date only when it is not today's date."""
+    return moment.strftime("%H:%M:%S UTC" if moment.date() == now.date() else "%Y-%m-%d %H:%M:%S UTC")
+
+
+def burn_time(item: dict, now: datetime) -> str | None:
+    burned = chain_time(item.get("burned_at"))
+    if burned is None:
+        return None
+    return f"Burned {format_clock(burned, now)}, {format_duration((now - burned).total_seconds())} ago"
+
+
+def mint_time(item: dict, now: datetime) -> str | None:
+    minted = chain_time(item.get("minted_at"))
+    if minted is None:
+        return None
+    burned = chain_time(item.get("burned_at"))
+    after = (f", {format_duration((minted - burned).total_seconds())} after the burn"
+             if burned is not None and minted >= burned else "")
+    return f"Minted {format_clock(minted, now)}{after}"
+
+
+def unfinished_for(item: dict, now: datetime) -> str | None:
+    burned = chain_time(item.get("burned_at"))
+    if burned is None or item.get("status") not in UNFINISHED_STATUSES:
+        return None
+    return f"Unfinished for {format_duration((now - burned).total_seconds())}"
+
+
+def lookup_error(mode: str, search: str, end_block: str = "") -> str:
+    """Return the inline message for a lookup the form should not send, or "" when it can be sent."""
+    value = (search or "").strip()
+    if mode == "transaction":
+        if not value:
+            return "Paste a Base Sepolia transaction hash."
+        if not HASH_FORMAT.fullmatch(value):
+            return "Enter the full transaction hash: 0x followed by 64 hex characters."
+        return ""
+    if not value:
+        return "Enter a wallet address."
+    if not WALLET_FORMAT.fullmatch(value):
+        return "Enter the full wallet address: 0x followed by 40 hex characters."
+    anchor = (end_block or "").strip()
+    if mode == "wallet" and anchor:
+        if not anchor.isascii() or not anchor.isdecimal():
+            return "Use digits only for the end block."
+        if len(anchor) > 16:
+            return "Use at most 16 digits for the end block."
+    return ""
+
+
+def block_window(blocks: int, end_block: str = "") -> tuple[int, int] | None:
+    """The source block range a scan will read, when the end block is fixed. Mirrors RecoveryService.scan."""
+    anchor = (end_block or "").strip()
+    if not (anchor.isascii() and anchor.isdecimal()):
+        return None
+    end = int(anchor)
+    return max(0, end - blocks + 1), end
+
+
+def scan_status_line(mode: str, search: str, blocks: int, end_block: str = "", *, end_time: str = "") -> str:
+    """What the ledger says while a lookup runs: the exact range or transaction being read."""
+    target = shorten((search or "").strip().lower(), 4)
+    if mode == "transaction":
+        return f"Checking Base Sepolia transaction {target}"
+    if mode == "stream":
+        return f"Searching the Stream index for {target}"
+    if end_time:
+        return f"Resolving the UTC cutoff for {target}"
+    window = block_window(blocks, end_block)
+    if window:
+        return f"Scanning Base Sepolia blocks {window[0]:,}–{window[1]:,} for {target}"
+    return f"Scanning the latest {blocks:,} Base Sepolia blocks for {target}"
+
+
+def empty_result_message(mode: str, blocks: int, end_block: str = "", *, end_time: str = "") -> str:
+    if mode == "transaction":
+        return "No supported burn in this transaction. Use the original Base Sepolia burn transaction hash."
+    if mode == "stream":
+        return ("No burns for this address have been delivered to the Stream index on this endpoint. Rebound did not scan "
+                "Base Sepolia history. A transfer outside the Stream's range will not appear here. "
+                "Search by transaction hash or scan history to look further.")
+    if end_time:
+        return "No supported transfers in the resolved UTC window."
+    window = block_window(blocks, end_block)
+    if window:
+        return f"No supported transfers in Base Sepolia blocks {window[0]:,}–{window[1]:,}."
+    return f"No supported transfers in the latest {blocks:,} Base Sepolia blocks."
+
+
+def wider_window(blocks: int) -> int | None:
+    """The next history option after `blocks`, or None at the largest window."""
+    return next((size for size in HISTORY_WINDOWS if size > blocks), None)
+
+
+def filter_empty_message(filter_key: str, query: str) -> str:
+    query = " ".join((query or "").split())
+    if query:
+        shown = query if len(query) <= 32 else query[:31] + "…"
+        return f"No transfers in this view match “{shown}”."
+    return {"completed": "No completed transfers in this lookup.",
+            "attention": "No transfers in this lookup need attention."}.get(filter_key, "No transfers in this view.")
 
 
 def proof_steps(item: dict) -> list[tuple[str, str, str]]:
@@ -183,7 +331,7 @@ class InboxState:
                 "completed": sum(item["status"] == "completed" for item in self.transfers)}
 
     async def scan(self, service: Any, search: str, blocks: int, end_block: str = "", *,
-                   mode: str = "wallet", log_index: int | None = None) -> None:
+                   end_time: str | None = None, mode: str = "wallet", log_index: int | None = None) -> None:
         self.busy = True
         self.example = False
         self.scanned = False
@@ -210,9 +358,15 @@ class InboxState:
                     result = await service.scan_stream(wallet)
                 else:
                     anchor = end_block.strip()
-                    if anchor and (not anchor.isascii() or not anchor.isdecimal() or len(anchor) > 16):
+                    if anchor and (not anchor.isascii() or not anchor.isdecimal()):
                         raise ValueError("Enter a Base Sepolia end block using digits only.")
+                    if len(anchor) > 16:
+                        raise ValueError("Use at most 16 digits for the end block.")
                     options = {"end_block": int(anchor)} if anchor else {}
+                    if end_time and end_time.strip():
+                        if anchor:
+                            raise ValueError("Choose an ending block or an ending UTC time, not both.")
+                        options["end_time"] = end_time.strip()
                     result = await service.scan(wallet, blocks=blocks, **options)
             self.transfers = result["transfers"]
             self.coverage = result.get("coverage") or f"Base Sepolia blocks {result['from_block']:,}–{result['to_block']:,}."
@@ -232,6 +386,17 @@ class InboxState:
         return await service.prepare(transfer["tx_hash"], transfer["log_index"], signer)
 
 
+@dataclass(eq=False)
+class Recheck:
+    """One automatic recheck run, bound to one selected live transfer."""
+    state: InboxState
+    key: str
+    started: float
+    remaining: int = RECHECK_SECONDS
+    active: bool = True
+    note: str = ""
+
+
 def field_style(**overrides) -> dict:
     style = dict(filled=True, fill_color=SURFACE, border_color=RULE_STRONG, focused_border_color=ACCENT,
                  border_radius=6, cursor_color=ACCENT, autocorrect=False,
@@ -248,9 +413,18 @@ class InboxUI:
         self.state = InboxState()
         self._wallet_sessions: dict[tuple[str, int], str] = {}
         self.wallet_input = ft.TextField(hint_text="Wallet address, 0x…", height=48,
-                                         on_submit=self.scan, **field_style())
+                                         on_submit=self.scan, on_change=self.input_changed, **field_style())
         self.tx_input = ft.TextField(hint_text="Base Sepolia transaction hash, 0x…", height=48,
-                                     on_submit=self.inspect_transaction, **field_style())
+                                     on_submit=self.inspect_transaction, on_change=self.input_changed,
+                                     **field_style())
+        # Inline form validation: shown under the form, before any network call.
+        self.input_error = ""
+        self.input_error_field = None
+        self.input_error_value = ""
+        self.input_error_text = ft.Text("", size=12.5, color=RED, weight=ft.FontWeight.W_600, visible=False)
+        self.input_error_notice = ft.Semantics(content=self.input_error_text, live_region=True, visible=False)
+        # What the last lookup asked for, so loading, empty and retry copy describe that request.
+        self.last_lookup: dict | None = None
         self.show_transaction = False
         self.history = ft.Dropdown(
             value="2000", width=176, text_size=13, dense=True,
@@ -261,9 +435,21 @@ class InboxUI:
             filled=True, fill_color=SURFACE, border_color=RULE_STRONG, focused_border_color=ACCENT,
             border_radius=6, content_padding=ft.Padding.symmetric(horizontal=12, vertical=6),
         )
-        self.end_block = ft.TextField(hint_text="End block, blank for latest", width=230, height=40,
+        # Flet's visual Dropdown label does not name its web accessibility button.
+        self.history_accessibility = ft.Semantics(content=self.history, label="Block window")
+        self.history_ending = ft.Dropdown(value="latest", width=188, text_size=13, dense=True,
+            options=[ft.DropdownOption("latest", "Latest blocks"), ft.DropdownOption("block", "End block"),
+                     ft.DropdownOption("time", "End time (UTC)")], on_select=self.change_history_ending,
+            filled=True, fill_color=SURFACE, border_color=RULE_STRONG, focused_border_color=ACCENT,
+            border_radius=6, content_padding=ft.Padding.symmetric(horizontal=12, vertical=6))
+        self.history_ending_accessibility = ft.Semantics(content=self.history_ending, label="History ending")
+        self.end_block = ft.TextField(hint_text="Base Sepolia end block", width=230, height=40,
                                       keyboard_type=ft.KeyboardType.NUMBER, on_submit=self.scan,
+                                      on_change=self.input_changed,
                                       **field_style(content_padding=ft.Padding.symmetric(horizontal=12, vertical=10)))
+        self.end_time = ft.TextField(hint_text="YYYY-MM-DD HH:MM (UTC)", width=280, height=40,
+                                     on_submit=self.scan,
+                                     **field_style(content_padding=ft.Padding.symmetric(horizontal=12, vertical=10)))
         self.show_history = False
         self.caller_input = ft.TextField(hint_text="Signing address, 0x…", height=42,
                                          on_change=self.caller_changed, **field_style())
@@ -279,6 +465,12 @@ class InboxUI:
         self.replay_item = None
         self.replay_result = None
         self.replay_error = ""
+        self._recheck: Recheck | None = None
+        self._recheck_text: ft.Text | None = None
+        self.client_connected = True
+        self._connection_generation = 0
+        self.recheck_sleep = asyncio.sleep
+        self.recheck_clock = time.monotonic
         self.root = ft.Row(expand=True, spacing=0, vertical_alignment=ft.CrossAxisAlignment.STRETCH)
         self.search_input = ft.TextField(hint_text="Filter by hash, address or amount", height=34, width=250,
             on_change=self.search,
@@ -320,14 +512,28 @@ class InboxUI:
             color_scheme=ft.ColorScheme(primary=ACCENT, on_primary=SURFACE, surface=SURFACE, on_surface=INK,
                                         on_surface_variant=INK_2, outline=RULE_STRONG, outline_variant=RULE,
                                         surface_tint=SURFACE, error=RED),
-            splash_color="#00000000", divider_color=RULE)
+            # Clickable rows and tabs use ink: a neutral wash on hover, a stronger one on keyboard focus.
+            splash_color="#00000000", hover_color=PAPER, focus_color=RULE, highlight_color=SELECTED,
+            divider_color=RULE)
         self.page.services.append(self.clipboard)
         self.page.services.append(self.semantics)
         self.page.on_resize = self.resize
         self.page.on_route_change = self.route_changed
+        # A disconnected tab skips its rechecks until Flet reconnects the session.
+        self.page.on_connect = self.client_reconnected
+        self.page.on_disconnect = self.client_disconnected
         self.page.add(self.root)
         self._installed = True
         self.render()
+
+    def client_reconnected(self, _=None) -> None:
+        self.client_connected = True
+        if self._installed:
+            self.render()
+
+    def client_disconnected(self, _=None) -> None:
+        self.client_connected = False
+        self._connection_generation += 1
 
     async def load_motion_preference(self) -> None:
         try:
@@ -360,24 +566,38 @@ class InboxUI:
         return ft.Text(str(value), size=size, color=color, weight=None if mono else weight,
                        font_family=family, **kwargs)
 
+    @property
+    def tap_height(self) -> int:
+        """Phones get 44 px tap targets; desktop keeps the compact ledger rhythm."""
+        return 44 if self.narrow else 30
+
     def button(self, label, callback=None, *, primary=False, icon=None, disabled=False, url=None, height=40):
+        state = ft.ControlState
+        # Keyboard focus draws a 2 px ring in ink (on the accent fill) or the accent (on white).
+        side = ({state.FOCUSED: ft.BorderSide(2, INK), state.DEFAULT: ft.BorderSide(0, "#00000000")} if primary
+                else {state.FOCUSED: ft.BorderSide(2, ACCENT), state.DISABLED: ft.BorderSide(1, RULE),
+                      state.DEFAULT: ft.BorderSide(1, RULE_STRONG)})
         style = ft.ButtonStyle(
-            bgcolor={ft.ControlState.DISABLED: RULE, ft.ControlState.DEFAULT: ACCENT} if primary else SURFACE,
-            color={ft.ControlState.DISABLED: INK_3, ft.ControlState.DEFAULT: SURFACE if primary else INK},
-            side=None if primary else ft.BorderSide(1, RULE_STRONG),
-            shape=ft.RoundedRectangleBorder(radius=6), elevation=0,
+            bgcolor={state.DISABLED: RULE, state.DEFAULT: ACCENT} if primary else SURFACE,
+            color={state.DISABLED: INK_3, state.DEFAULT: SURFACE if primary else INK},
+            side=side, shape=ft.RoundedRectangleBorder(radius=6), elevation=0,
             padding=ft.Padding.symmetric(horizontal=16, vertical=0),
             text_style=ft.TextStyle(size=13, weight=ft.FontWeight.W_600, font_family=SANS),
             overlay_color="#14FFFFFF" if primary else "#0A141A17")
         cls = ft.FilledButton if primary else ft.OutlinedButton
-        return cls(label, icon=icon, on_click=callback, disabled=disabled, url=url, style=style, height=height)
+        return cls(label, icon=icon, on_click=callback, disabled=disabled, url=url, style=style,
+                   height=max(height, 44) if self.narrow else height)
 
     def link(self, label, callback=None, *, url=None, disabled=False, color=ACCENT, icon=None, flush=False):
+        state = ft.ControlState
         return ft.TextButton(label, icon=icon, icon_color=color, on_click=callback, url=url, disabled=disabled,
-                             height=30, style=ft.ButtonStyle(
-                                 color={ft.ControlState.DISABLED: INK_3, ft.ControlState.DEFAULT: color},
+                             height=self.tap_height, style=ft.ButtonStyle(
+                                 color={state.DISABLED: INK_3, state.DEFAULT: color},
                                  padding=ft.Padding.symmetric(horizontal=0 if flush else 6, vertical=0), icon_size=14,
                                  shape=ft.RoundedRectangleBorder(radius=4),
+                                 side={state.FOCUSED: ft.BorderSide(1.5, color),
+                                       state.DEFAULT: ft.BorderSide(0, "#00000000")},
+                                 overlay_color={state.FOCUSED: "#00000000", state.DEFAULT: "#0A141A17"},
                                  text_style=ft.TextStyle(size=13, weight=ft.FontWeight.W_600, font_family=SANS)))
 
     def status_mark(self, status, *, size=13, **kwargs):
@@ -397,6 +617,8 @@ class InboxUI:
         self.tx_input.disabled = self.state.busy
         self.history.disabled = self.state.busy
         self.end_block.disabled = self.state.busy
+        self.end_time.disabled = self.state.busy
+        self.history_ending.disabled = self.state.busy
         self.caller_input.disabled = self.preparing
         self.search_input.value = self.state.query
         self.inspector_host.animate_opacity = None
@@ -409,22 +631,35 @@ class InboxUI:
         elif self.state.selected:
             sheet = True
             self.inspector_host.content = self.inspector()
-            back = ft.Container(ft.Row([self.link("All transfers", self.back, icon=ft.Icons.ARROW_BACK, color=INK_2)]),
-                                bgcolor=SURFACE, border=ft.Border(bottom=ft.BorderSide(1, RULE)),
-                                padding=ft.Padding.only(left=10, top=6, bottom=6))
             content = [ft.Container(control, padding=ft.Padding.only(left=16, right=16, top=12, bottom=12))
                        for control in content]
-            content.extend([back, self.inspector_host])
+            content.append(self.inspector_host)
         else:
             content.extend([self.scan_panel(), self.inbox()])
+        if not sheet:
+            # Keep the last row clear of the screen edge and the phone's home indicator.
+            content.append(ft.Container(height=16))
         self.workspace_view.controls = content
         self.workspace_view.spacing = 0 if sheet else 16
-        self.body_host.content = self.split_body if self.split_workspace else self.workspace_view
+        if self.split_workspace:
+            self.body_host.content = self.split_body
+        elif sheet:
+            # The back bar stays pinned above the scrolling sheet so it is always one tap away.
+            self.body_host.content = ft.Column([self.sheet_back_bar(), self.workspace_view], spacing=0, expand=True,
+                                               horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
+        else:
+            self.body_host.content = self.workspace_view
         self.body_host.padding = 0 if self.split_workspace or sheet else (
             ft.Padding.only(left=16, right=16, top=16) if self.narrow else ft.Padding.only(left=24, right=24, top=22))
         self.header_host.content = self.header()
         self.root.controls = [self.main]
         self.page.update()
+
+    def sheet_back_bar(self):
+        return ft.Container(ft.Row([self.link("All transfers", self.back, icon=ft.Icons.ARROW_BACK, color=INK_2)]),
+                            bgcolor=SURFACE, border=ft.Border(bottom=ft.BorderSide(1, RULE)),
+                            padding=ft.Padding.only(left=10, right=10, top=0 if self.narrow else 6,
+                                                    bottom=0 if self.narrow else 6))
 
     def header(self):
         brand = self.text("Rebound", 16, INK, ft.FontWeight.W_800)
@@ -434,9 +669,9 @@ class InboxUI:
                                    padding=ft.Padding.symmetric(horizontal=6, vertical=1))
         links = [self.link("Coverage", self.coverage, color=INK_2), self.link("How it works", self.about, color=INK_2)]
         if self.narrow:
-            content = ft.Column([ft.Row([brand, environment, ft.Container(expand=True), *links], spacing=8),
-                                 route], spacing=2)
-            padding = ft.Padding.only(left=16, right=8, top=10, bottom=10)
+            content = ft.Column([ft.Row([brand, environment, ft.Container(expand=True), *links], spacing=4),
+                                 route], spacing=0)
+            padding = ft.Padding.only(left=16, right=8, top=4, bottom=10)
         else:
             content = ft.Row([brand, ft.Container(width=1, height=16, bgcolor=RULE_STRONG), route, environment,
                               ft.Container(expand=True), *links], spacing=14)
@@ -456,27 +691,37 @@ class InboxUI:
         busy = self.state.busy
         if self.show_transaction:
             entry = self.tx_input
-            action = self.button("Checking…" if busy else "Check transaction", self.inspect_transaction,
-                                 primary=True, disabled=busy, height=48)
+            # The label stays put while busy (the ledger says what is running), so the form does not reflow.
+            action = self.button("Check transaction", self.inspect_transaction, primary=True, disabled=busy, height=48)
             extras = []
         else:
             entry = self.wallet_input
-            action = self.button("Scanning…" if busy else "Find transfers", self.scan, primary=True, disabled=busy,
-                                 height=48)
-            extras = [self.history]
+            action = self.button("Find transfers", self.scan, primary=True, disabled=busy, height=48)
+            extras = [self.history_accessibility]
+        self.sync_input_error()
         if self.narrow:
             entry.expand = False
-            self.history.expand = True
+            self.history.expand = False
+            self.history_accessibility.expand = True
             self.history.width = None
-            form = ft.Column([entry, ft.Row([*extras, action], spacing=8)], spacing=8,
+            # On phones the form stacks, so the message goes straight under the field it is about.
+            form = ft.Column([entry, self.input_error_notice, ft.Row([*extras, action], spacing=8)], spacing=8,
                              horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
         else:
             entry.expand = True
             self.history.expand = False
+            self.history_accessibility.expand = False
             self.history.width = 176
             form = ft.Row([entry, *extras, action], spacing=8)
         options = [self.link("Search by wallet" if self.show_transaction else "Search by transaction",
                              self.toggle_transaction, disabled=busy)]
+        if not self.show_transaction and not self.state.example:
+            # The QuickNode search sits beside the main lookup, not under History options, so the
+            # walkthrough can be followed without hunting for it.
+            options.insert(0, self.link("Search Stream index", self.scan_index, icon=ft.Icons.BOLT,
+                                        disabled=busy))
+            if callable(getattr(self.service, "stream_status", None)):
+                options.insert(1, self.link("QuickNode walkthrough", self.quicknode_walkthrough, disabled=busy))
         if not self.show_transaction:
             options.extend(self.history_options())
             if self.state.example:
@@ -486,58 +731,121 @@ class InboxUI:
                 # Before the first lookup these two actions live in the empty ledger instead.
                 options.extend([self.link("Check a live sample", self.live_sample, disabled=busy),
                                 self.link("Explore examples", self.examples, disabled=busy)])
+        # Validation sits directly under the field it is about; lookup progress and
+        # service errors render inside the ledger, where the results will appear.
         controls = [form, ft.Row(options, wrap=True, spacing=4, run_spacing=0)]
+        if not self.narrow:
+            controls.insert(1, self.input_error_notice)
         if self.show_history and not self.show_transaction:
-            controls.append(ft.Row([self.end_block,
-                self.text("Scan back from this Base Sepolia block to revisit an older window.", 12, INK_3)],
-                wrap=True, spacing=12))
-        if busy:
-            controls.extend([ft.ProgressBar(color=ACCENT, bgcolor=RULE, bar_height=2),
-                             self.text("Reading source events, Circle attestations and destination state…", 12, INK_2)])
-        if self.state.error:
-            controls.append(ft.Container(self.text(self.state.error, 13, RED, ft.FontWeight.W_600),
-                                         bgcolor=RED_WASH, border=ft.Border.all(1, "#EFCFCB"), border_radius=6,
-                                         padding=ft.Padding.symmetric(horizontal=12, vertical=9)))
+            controls.append(self.history_window())
         return ft.Column(controls, spacing=8)
+
+    def mounted_fields(self) -> list:
+        fields = [self.tx_input] if self.show_transaction else [self.wallet_input]
+        if self.show_history and not self.show_transaction and self.history_ending.value == "block":
+            fields.append(self.end_block)
+        return fields
+
+    def sync_input_error(self) -> None:
+        """Mirror self.input_error onto the inline message and the field borders, without rebuilding the form."""
+        # An error belongs to the value it was raised for: when a handler replaces that value
+        # (examples, live sample, return to live), the message goes with it.
+        target = self.input_error_field
+        shown = (bool(self.input_error) and any(entry is target for entry in self.mounted_fields())
+                 and (target.value or "") == self.input_error_value)
+        self.input_error_text.value = self.input_error if shown else ""
+        self.input_error_text.visible = shown
+        self.input_error_notice.visible = shown
+        for entry in (self.wallet_input, self.tx_input, self.end_block):
+            invalid = shown and entry is self.input_error_field
+            entry.border_color = RED if invalid else RULE_STRONG
+            entry.focused_border_color = RED if invalid else ACCENT
+
+    def set_input_error(self, message: str, target=None) -> None:
+        value = (target.value or "") if target is not None else ""
+        if message == self.input_error and target is self.input_error_field and value == self.input_error_value:
+            return
+        self.input_error, self.input_error_field = message, target
+        self.input_error_value = value
+        self.sync_input_error()
+        if self._installed and (self.split_workspace or not self.state.selected):
+            # Update in place: replacing the form's ancestors would drop keyboard focus from the field.
+            for control in (self.input_error_notice, *self.mounted_fields()):
+                control.update()
+
+    def input_changed(self, _=None) -> None:
+        if self.input_error:
+            self.set_input_error("", None)
 
     def history_options(self):
         history_label = "Hide history options" if self.show_history else "History options"
-        if not self.show_history and self.end_block.value.strip():
-            history_label = f"History options (end block {self.end_block.value.strip()[:16]})"
-        options = [self.link(history_label, self.toggle_history, disabled=self.state.busy)]
-        if not self.state.example and getattr(getattr(self.service, "settings", None), "stream_enabled", False):
-            options.append(self.link("Search Stream index", self.scan_index, disabled=self.state.busy))
-        return options
+        if not self.show_history:
+            if self.history_ending.value == "block" and self.end_block.value.strip():
+                history_label = f"History options (end block {self.end_block.value.strip()[:16]})"
+            elif self.history_ending.value == "time" and self.end_time.value.strip():
+                history_label = "History options (end time UTC)"
+        return [self.link(history_label, self.toggle_history, disabled=self.state.busy)]
+
+    def history_window(self):
+        ending = self.history_ending.value
+        anchor = self.end_block if ending == "block" else self.end_time if ending == "time" else None
+        self.history_ending.width = None if self.narrow else 188
+        controls = [self.history_ending_accessibility]
+        if anchor is not None:
+            anchor.width = None if self.narrow else 280 if ending == "time" else 230
+            controls.append(anchor)
+        fields = (ft.Column(controls, spacing=8, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
+                  if self.narrow else ft.Row(controls, spacing=8))
+        note = ("Scan backwards from the latest Base Sepolia block by the selected block window." if ending == "latest"
+                else "Choose a time after the transfer. Rebound scans backward over the selected number of blocks. "
+                "Times without seconds use :00 UTC; blank uses latest."
+                if ending == "time" else "Choose an ending Base Sepolia block. Rebound scans backward over the selected number of blocks. Blank uses latest.")
+        return ft.Column([fields, self.text(note, 12, INK_3)], spacing=6)
+
+    def change_history_ending(self, _=None):
+        if not self.state.busy:
+            self.render()
 
     def inbox(self):
         counts = self.state.counts()
 
         def tab(label, key):
             active = self.state.filter == key
-            parts = [self.text(label, 13, INK if active else INK_2, ft.FontWeight.W_700 if active else ft.FontWeight.W_500)]
-            if self.state.scanned:
-                parts.append(self.text(counts[key], 12, INK if active else INK_3, mono=True))
-            return ft.Container(ft.Row(parts, spacing=6, tight=True),
-                                padding=ft.Padding.only(top=12, bottom=10),
+            parts = [self.text(label, 13, INK if active else INK_2, ft.FontWeight.W_700 if active else ft.FontWeight.W_500),
+                     self.text(counts[key], 12, INK if active else INK_3, mono=True)]
+            # ink makes the tab a focusable, hoverable button; the 2 px ink rule marks the active one.
+            return ft.Container(ft.Row(parts, spacing=6, tight=True), ink=True, border_radius=0,
+                                padding=ft.Padding.only(left=4, right=4, top=13 if self.narrow else 12,
+                                                        bottom=11 if self.narrow else 10),
                                 border=ft.Border(bottom=ft.BorderSide(2, INK if active else "#00000000")),
                                 on_click=lambda _: self.set_filter(key))
         tabs = ft.Row([tab("All" if self.narrow else "All transfers", "all"), tab("Needs attention", "attention"),
                        tab("Completed", "completed")],
-                      spacing=18, tight=True, scroll=ft.ScrollMode.HIDDEN if self.narrow else None)
+                      spacing=10, tight=True, scroll=ft.ScrollMode.HIDDEN if self.narrow else None)
         if self.narrow or self.ledger_width < 640:
             self.search_input.width = None
             self.search_input.expand = False
+            self.search_input.height = 44 if self.narrow else 34
             top = ft.Column([tabs, ft.Container(self.search_input, padding=ft.Padding.only(bottom=10))], spacing=6,
                             horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
         else:
             self.search_input.width = 250
+            self.search_input.height = 34
             top = ft.Row([tabs, ft.Container(expand=True), self.search_input])
         self.ledger_host.content = self.ledger_content()
-        # Tabs and the filter only mean something once a lookup has produced records.
-        chrome = [ft.Container(top, padding=ft.Padding.symmetric(horizontal=16)),
-                  ft.Divider(color=RULE, height=1, thickness=1)] if self.state.scanned else []
+        # Tabs and the filter only mean something once a lookup has produced records:
+        # never show empty counts, and never leave old counts up while a new lookup runs.
+        chrome = [ft.Container(top, padding=ft.Padding.only(left=12, right=16)),
+                  ft.Divider(color=RULE, height=1, thickness=1)] if self.has_records else []
+        if self.state.busy:
+            # The progress rule takes the frame's top edge, so the frame itself does not move.
+            chrome = [ft.ProgressBar(color=ACCENT, bgcolor=RULE, bar_height=2)]
         return ft.Container(ft.Column([*chrome, self.ledger_host], spacing=0),
             bgcolor=SURFACE, border_radius=8, border=ft.Border.all(1, RULE), clip_behavior=ft.ClipBehavior.ANTI_ALIAS)
+
+    @property
+    def has_records(self) -> bool:
+        return self.state.scanned and bool(self.state.transfers) and not self.state.busy
 
     def columns(self) -> list[tuple[str, int | None, bool]]:
         columns = [("Amount, USDC", 112, True), ("Status", 168, False), ("Source transaction", None, False),
@@ -549,6 +857,11 @@ class InboxUI:
     def ledger_content(self):
         children = []
         visible = self.state.visible_transfers()
+        if self.state.busy:
+            # Never show the previous lookup's rows, error or coverage under a new lookup.
+            return ft.Column([self.loading_ledger()], spacing=0)
+        if self.state.error:
+            return ft.Column([self.error_ledger()], spacing=0)
         if visible:
             if not self.narrow:
                 cells = [self.text(label, 12, INK_3, ft.FontWeight.W_600, width=width, expand=width is None,
@@ -569,26 +882,59 @@ class InboxUI:
                                          padding=ft.Padding.only(left=16, right=16, bottom=11)))
         return ft.Column(children, spacing=0)
 
+    def ledger_note(self, lines, actions=()):
+        """One state of the ledger body: a lead line, optional detail, optional actions. Shared padding keeps
+        the frame steady as it moves between first-run, loading, empty and error."""
+        controls = list(lines)
+        if actions:
+            controls.append(ft.Row(list(actions), spacing=12, wrap=True, run_spacing=4,
+                                   vertical_alignment=ft.CrossAxisAlignment.CENTER))
+        return ft.Container(ft.Column(controls, spacing=8), padding=ft.Padding.symmetric(horizontal=16, vertical=18))
+
+    def lookup_line(self) -> str:
+        lookup = self.last_lookup or {}
+        return scan_status_line(lookup.get("mode", "wallet"), lookup.get("search", ""),
+                                lookup.get("blocks", 2000), lookup.get("end_block", ""),
+                                end_time=lookup.get("end_time", ""))
+
+    def loading_ledger(self):
+        return self.ledger_note([
+            self.text(self.lookup_line() if self.last_lookup else "Looking up transfers…", 13, INK, ft.FontWeight.W_600),
+            self.text("Reading source events, Circle attestations and destination state…", 12, INK_2),
+        ])
+
+    def error_ledger(self):
+        actions = [self.button("Try again", self.retry, disabled=self.state.busy)] if self.last_lookup else []
+        return self.ledger_note([self.text(self.state.error, 13, RED, ft.FontWeight.W_600)], actions)
+
     def empty_ledger(self):
         if self.state.scanned:
-            message = "No transfers match this filter." if self.state.transfers else {
-                "stream": "The Stream index has no supported transfers for this address. Scan source history directly.",
-                "transaction": "No supported burn in this transaction. Use the original Base Sepolia burn transaction hash.",
-                "wallet": "No supported transfers in this range. Try a wider history range.",
-            }[self.state.mode]
-            return ft.Container(self.text(message, 13, INK_2), padding=ft.Padding.symmetric(horizontal=16, vertical=20))
-        if self.state.busy:
-            return ft.Container(self.text("Looking up transfers…", 13, INK_3),
-                                padding=ft.Padding.symmetric(horizontal=16, vertical=20))
+            if self.state.transfers:
+                return self.ledger_note([self.text(filter_empty_message(self.state.filter, self.state.query), 13, INK_2)],
+                                        [self.link("Clear filter", self.clear_filter, flush=True)])
+            lookup = self.last_lookup or {"mode": self.state.mode, "blocks": int(self.history.value or "2000"),
+                                          "end_block": ""}
+            mode = lookup["mode"]
+            actions = []
+            if mode == "wallet":
+                wider = wider_window(lookup["blocks"])
+                if wider:
+                    actions.append(self.button(f"Search {wider:,} blocks", self.widen, disabled=self.state.busy))
+                if not self.show_transaction:
+                    actions.append(self.link("Search by transaction", self.toggle_transaction,
+                                             disabled=self.state.busy))
+            elif mode == "stream":
+                actions.append(self.button("Scan source history", self.scan, disabled=self.state.busy))
+            message = empty_result_message(mode, lookup["blocks"], lookup["end_block"],
+                                           end_time=lookup.get("end_time", ""))
+            return self.ledger_note([self.text(message, 13, INK, ft.FontWeight.W_600)], actions)
         if self.show_transaction:
-            return ft.Container(self.text("Paste the Base Sepolia hash of the original burn transaction.", 13, INK_2),
-                                padding=ft.Padding.symmetric(horizontal=16, vertical=20))
-        return ft.Container(ft.Column([
-            self.text("Enter a wallet address to list its USDC transfers from Base Sepolia to Arc.", 14, INK,
-                      ft.FontWeight.W_600),
-            ft.Row([self.button("Check a live sample", self.live_sample, disabled=self.state.busy),
-                    self.link("Explore examples", self.examples, disabled=self.state.busy)], spacing=12, wrap=True),
-        ], spacing=12), padding=ft.Padding.symmetric(horizontal=16, vertical=20))
+            return self.ledger_note([self.text("Paste the Base Sepolia hash of the original burn transaction.", 13, INK_2)])
+        return self.ledger_note(
+            [self.text("Enter a wallet address to list its USDC transfers from Base Sepolia to Arc.", 14, INK,
+                       ft.FontWeight.W_600)],
+            [self.button("Check a live sample", self.live_sample, disabled=self.state.busy),
+             self.link("Explore examples", self.examples, disabled=self.state.busy)])
 
     def transfer_row(self, item):
         selected = bool(self.state.selected and item["key"] == self.state.selected["key"])
@@ -614,7 +960,8 @@ class InboxUI:
                                        alignment=ft.Alignment.CENTER_RIGHT if right else ft.Alignment.CENTER_LEFT)
                           for label, width, right in self.columns()], spacing=20)
             padding = ft.Padding.symmetric(horizontal=16, vertical=11)
-        return ft.Container(row, padding=padding, bgcolor=SELECTED if selected else SURFACE,
+        # ink gives the row a hover wash, a pointer and keyboard focus (Tab, then Enter or Space opens it).
+        return ft.Container(row, padding=padding, bgcolor=SELECTED if selected else SURFACE, ink=True,
                             border=ft.Border(bottom=ft.BorderSide(1, RULE)),
                             on_click=lambda _: self.inspect(item))
 
@@ -632,15 +979,20 @@ class InboxUI:
                        ft.Container(body, expand=True, padding=ft.Padding.only(bottom=0 if last else 16))],
                       spacing=12, intrinsic_height=True, vertical_alignment=ft.CrossAxisAlignment.STRETCH)
 
-    def proof(self, item):
+    def proof(self, item, now: datetime | None = None):
         live = not self.state.example and not item.get("example")
+        now = now or datetime.now(UTC)
 
-        def line(value):
-            return self.text(value, 12, INK_2, mono=True, selectable=True)
-        burn = [line(f"Block {item['block_number']:,}, log {item['log_index']}"),
-                line(f"Tx {shorten(item['tx_hash'], 6)}")]
-        if item.get("source_confirmations") is not None:
-            burn.append(line(f"{item['source_confirmations']:,} confirmations"))
+        def line(value, *, selectable=True):
+            return self.text(value, 12, INK_2, mono=True, selectable=selectable)
+        burned = burn_time(item, now) if live else None
+        burn = [line(burned, selectable=False)] if burned else []
+        burn.extend([line(f"Block {item['block_number']:,}, log {item['log_index']}"),
+                     line(f"Tx {shorten(item['tx_hash'], 6)}")])
+        confirmations = item.get("source_confirmations")
+        if confirmations is not None:
+            burn.append(line(f"{confirmations} of {MIN_RECOVERY_CONFIRMATIONS} Base confirmations"
+                             if item["status"] == "source_confirming" else f"{confirmations:,} confirmations"))
         if live and item.get("source_url"):
             burn.append(self.proof_link("Open source receipt", item["source_url"]))
         attestation = []
@@ -649,14 +1001,17 @@ class InboxUI:
         if item.get("expiration_block"):
             attestation.append(line(f"Expires at Arc block {item['expiration_block']:,}"))
         mint = []
+        destination_url = item.get("destination_url") if live else None
+        submitted_url = self.submitted_receipt_url(item)
+        minted = mint_time(item, now) if destination_url or submitted_url else None
+        if minted:
+            mint.append(line(minted, selectable=False))
         if item.get("destination_block") is not None:
             # destination_block is when Rebound read the nonce, not when the mint happened.
             nonce_status = "used" if item["nonce_used"] else "unused"
             mint.append(line(f"Nonce {nonce_status}, read at Arc block {item['destination_block']:,}"))
-        destination_url = item.get("destination_url") if live else None
         if destination_url:
             mint.append(self.proof_link("Open verified Arc receipt", destination_url))
-        submitted_url = self.submitted_receipt_url(item)
         if submitted_url:
             mint.append(line("Submitted receipt matches the original message"))
             mint.append(self.proof_link("Open submitted Arc receipt", submitted_url))
@@ -724,6 +1079,17 @@ class InboxUI:
             head.append(ft.IconButton(ft.Icons.CLOSE, icon_color=INK_3, icon_size=18, on_click=self.back,
                                       tooltip="Close details"))
         checked = (item["checked_at"].replace("T", " ").removesuffix("+00:00") + " UTC") if item.get("checked_at") else None
+        now = datetime.now(UTC)  # One reading per render; relative times never schedule their own updates.
+        status = self.status_mark(item["status"], size=14)
+        stuck = unfinished_for(item, now)
+        if stuck:
+            status = ft.Row([status, self.text(stuck, 12, INK_2, mono=True)], spacing=14, wrap=True, run_spacing=4,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER)
+        proof_header = [self.section_title("Proof", self.text(f"Checked {checked}", 11.5, INK_3, mono=True)
+                                           if checked else None)]
+        recheck = self.recheck_line(item)
+        if recheck is not None:
+            proof_header.append(recheck)
         recipient = ft.Column([
             self.text("CCTP mint recipient" if downstream else "Fixed recipient", 12, INK_3),
             self.text(item["recipient"], 12.5, INK, mono=True, selectable=True),
@@ -732,10 +1098,10 @@ class InboxUI:
         ], spacing=3)
         sections = [
             ft.Column([ft.Row(head, vertical_alignment=ft.CrossAxisAlignment.START),
-                       self.status_mark(item["status"], size=14),
+                       status,
                        self.text(item.get("explanation") or description, 13, INK_2)], spacing=8),
-            ft.Column([self.section_title("Proof", self.text(f"Checked {checked}", 11.5, INK_3, mono=True)
-                                          if checked else None), self.proof(item)], spacing=12),
+            *([evidence] if (evidence := self.quicknode_evidence(item)) is not None else []),
+            ft.Column([*proof_header, self.proof(item, now)], spacing=12),
             recipient,
             self.amounts(item),
             self.next_step(item),
@@ -765,7 +1131,9 @@ class InboxUI:
         if item.get("forward_state"):
             facts.append(self.fact("Circle delivery report", item["forward_state"].title(), mono=False))
         if item.get("discovery_source"):
-            discovery = {"stream": "Stream delivery", "example_stream": "Simulated Stream delivery", "rpc": "Source RPC history",
+            discovery = {"stream": "Authenticated Stream payload" if authenticated_stream_payload(item)
+                         else "Stream endpoint record",
+                         "example_stream": "Simulated Stream delivery", "rpc": "Source RPC history",
                          "receipt": "Base Sepolia receipt"}[item["discovery_source"]]
             facts.append(self.fact("Discovered via", discovery, mono=False))
         actions = []
@@ -777,6 +1145,89 @@ class InboxUI:
         if actions:
             controls.append(ft.Row(actions, wrap=True, spacing=16))
         return ft.Column(controls, spacing=8)
+
+    def state_mark(self, state: str, *, size: int = 18):
+        """A small icon for one evidence state. Verified is the only state drawn as a success."""
+        icon, color = {"verified": (ft.Icons.CHECK_CIRCLE, ACCENT), "observed": (ft.Icons.CHECK_CIRCLE_OUTLINE, INK_2),
+                       "simulated": (ft.Icons.SCIENCE_OUTLINED, AMBER)}.get(state, (ft.Icons.SCHEDULE, INK_3))
+        return ft.Icon(icon, color=color, size=size)
+
+    def evidence_row(self, step) -> ft.Control:
+        lines = [self.text(step.title, 13, INK, ft.FontWeight.W_600), self.text(step.detail, 12, INK_3)]
+        if step.url:
+            lines.append(self.link("View original burn" if step.key == "burn" else "View on explorer", url=step.url,
+                                   icon=ft.Icons.OPEN_IN_NEW, flush=True))
+        return ft.Row([self.state_mark(step.state), ft.Column(lines, spacing=2, expand=True)], spacing=10,
+                      vertical_alignment=ft.CrossAxisAlignment.START)
+
+    def quicknode_evidence(self, item):
+        """Compact endpoint evidence; the existing proof below owns the chain checks."""
+        steps = evidence_steps(item, state_copy(item["status"])[0])
+        if not steps:
+            return None
+        return ft.Column([self.section_title("Stream discovery"), self.evidence_row(steps[1])], spacing=8)
+
+    async def quicknode_walkthrough(self, _=None) -> None:
+        settings = getattr(self.service, "settings", None)
+        wallet = getattr(settings, "quicknode_demo_wallet", "")
+        if not wallet or self.page is None:
+            return
+        try:
+            status = await asyncio.to_thread(self.service.stream_status, wallet)
+        except Exception as exc:
+            self.page.show_dialog(self.dialog("QuickNode walkthrough", [self.text(safe_error(exc), 13, INK_2)]))
+            return
+        wallet = status["wallet"]
+        searched = self.state.transfers if (self.state.mode == "stream" and self.state.wallet == wallet
+                                            and not self.state.example) else []
+        checks = walkthrough_checks(enabled=status["enabled"], delivered=status["delivered"],
+                                    last_received=status["last_received"], transfers=searched,
+                                    local=status.get("local", 0))
+
+        def use_wallet(_=None) -> None:
+            self.show_transaction = False
+            self.wallet_input.value = wallet
+            self.page.pop_dialog()
+            self.render()
+
+        rows = [(step.title, ft.Row([self.state_mark(step.state, size=16),
+                                     self.text(step.detail, 12.5, INK_2, expand=True)], spacing=8,
+                                    vertical_alignment=ft.CrossAxisAlignment.START)) for step in checks]
+        self.page.show_dialog(self.dialog("QuickNode walkthrough", [
+            self.text("Enter only a public wallet address. Rebound searches the Stream endpoint index, then checks "
+                      "the source and destination evidence. Endpoint authentication and actual provider delivery are separate.", 13, INK_2),
+            ft.Column([self.text("Walkthrough wallet (testnet, public)", 12, INK_3),
+                       self.text(wallet, 12.5, INK, mono=True, selectable=True)], spacing=2),
+            self.button("Use this wallet", use_wallet, primary=True, icon=ft.Icons.WALLET),
+            self.dialog_rows(rows),
+            self.text("Each check is separate. Pending means not yet observed. Simulated means synthetic data.", 12, INK_3),
+            *self.stream_context(),
+        ]))
+
+    def stream_context(self) -> list:
+        """Why Rebound uses QuickNode Streams, and the recorded state of its Stream."""
+        controls = [
+            self.text("Why QuickNode Streams", 13, INK, ft.FontWeight.W_700),
+            self.dialog_rows([
+                ("No hash to start from",
+                 "After a lost session a user has only an address. Reading chain history over RPC is bounded, "
+                 "slow and often rate limited."),
+                ("Filtered at the source",
+                 "The configured filter selects Circle CCTP V2 USDC burns from Base Sepolia blocks."),
+                ("Index, then verify",
+                 "The wallet search reads indexed records, then rechecks the source receipt, Circle and Arc."),
+            ], numbered=True),
+        ]
+        record = load_stream_record()
+        if record is not None:
+            controls.extend([
+                self.text("Recorded Stream setup", 13, INK, ft.FontWeight.W_700),
+                self.dialog_rows([(label, self.text(value, 12.5, INK_2, mono=label == "Stream ID",
+                                                    selectable=label == "Stream ID"))
+                                  for label, value in stream_facts(record)]),
+                self.text("Dashboard snapshot recorded during setup. Current provider status is unverified.", 12, INK_3),
+            ])
+        return controls
 
     async def copy_evidence(self, _=None) -> None:
         item = self.state.selected
@@ -806,7 +1257,7 @@ class InboxUI:
         if submitted_url:
             fields.append(f"Verified submitted Arc receipt: {submitted_url}")
         await self.clipboard.set("\n".join(fields))
-        self.page.show_dialog(ft.SnackBar(content=self.text("Transfer evidence copied", color="#FFFFFF")))
+        self.notify("Evidence copied")
 
     def case_link(self, item: dict) -> str | None:
         page_url = urlsplit(getattr(self.page, "url", "") or "")
@@ -821,7 +1272,7 @@ class InboxUI:
         link = self.case_link(item) if item else None
         if link:
             await self.clipboard.set(link)
-            self.page.show_dialog(ft.SnackBar(content=self.text("Live case link copied", color="#FFFFFF")))
+            self.notify("Case link copied")
 
     def search(self, _=None):
         self.state.query = self.search_input.value or ""
@@ -844,20 +1295,55 @@ class InboxUI:
             return True
         return False
 
-    def dialog(self, title, paragraphs, action):
+    def notify(self, message: str) -> None:
+        """One snackbar style for every confirmation: ink, compact, "<thing> copied"."""
+        self.page.show_dialog(ft.SnackBar(
+            content=self.text(message, 13, SURFACE, ft.FontWeight.W_600), bgcolor=INK, elevation=0,
+            behavior=ft.SnackBarBehavior.FLOATING, shape=ft.RoundedRectangleBorder(radius=6),
+            width=None if self.narrow else 320, margin=ft.Margin.all(16) if self.narrow else None,
+            padding=ft.Padding.symmetric(horizontal=16, vertical=12), duration=2500))
+
+    def dialog_rows(self, rows, *, numbered=False):
+        """Hairline-separated rows in the ledger's type: label left, value or note right (stacked on phones)."""
+        lines = []
+        for index, (label, value) in enumerate(rows):
+            lead = [self.text(index + 1, 12, INK_3, mono=True, width=16)] if numbered else []
+            label_text = self.text(label, 13 if numbered else 12, INK if numbered else INK_3,
+                                   ft.FontWeight.W_600 if numbered else None)
+            value_text = value if isinstance(value, ft.Control) else self.text(value, 12.5, INK_2)
+            if numbered or self.narrow:
+                body = ft.Column([label_text, value_text], spacing=2, expand=True)
+            else:
+                body = ft.Row([ft.Container(label_text, width=104), ft.Container(value_text, expand=True)],
+                              vertical_alignment=ft.CrossAxisAlignment.START, expand=True)
+            lines.append(ft.Container(ft.Row([*lead, body], spacing=8, vertical_alignment=ft.CrossAxisAlignment.START),
+                                      padding=ft.Padding.symmetric(vertical=10),
+                                      border=ft.Border(top=ft.BorderSide(1, RULE))))
+        return ft.Column(lines, spacing=0)
+
+    def dialog(self, title, controls, action="Close"):
         return ft.AlertDialog(
-            title=self.text(title, 18, INK, ft.FontWeight.W_700),
-            content=ft.Column([self.text(body, size, color) for body, size, color in paragraphs],
-                              spacing=14, tight=True, width=480),
+            title=self.text(title, 16, INK, ft.FontWeight.W_700),
+            content=ft.Column(controls, spacing=12, tight=True, width=440),
             actions=[self.link(action, lambda _: self.page.pop_dialog())],
-            bgcolor=SURFACE, shape=ft.RoundedRectangleBorder(radius=8), scrollable=True)
+            bgcolor=SURFACE, shape=ft.RoundedRectangleBorder(radius=8), scrollable=True, elevation=0,
+            inset_padding=ft.Padding.symmetric(horizontal=16, vertical=24) if self.narrow else None,
+            title_padding=ft.Padding.only(left=24, right=24, top=20, bottom=0),
+            content_padding=ft.Padding.only(left=24, right=24, top=10, bottom=0),
+            actions_padding=ft.Padding.only(left=16, right=16, top=8, bottom=12))
 
     def coverage(self, _=None):
-        self.page.show_dialog(self.dialog("Supported route", [
-            ("Native USDC over CCTP V2, from Base Sepolia to Arc Testnet.", 14, INK),
-            (self.state.coverage or "Scan a public address to inspect the exact source block range. The app covers supported CCTP V2 burns; it does not search every bridge or unknown router.", 13, INK_2),
-            ("An empty result is not proof that no unfinished transfer exists outside this coverage.", 13, INK_2),
-        ], "Close"))
+        searched = self.state.coverage or "No lookup yet. Each lookup states the exact source blocks it read."
+        self.page.show_dialog(self.dialog("Coverage", [
+            self.dialog_rows([
+                ("Route", self.text("Base Sepolia → Arc Testnet", 13, INK, ft.FontWeight.W_500)),
+                ("Transfers", "Native USDC burns over CCTP V2 to Arc, found by wallet or by source transaction."),
+                ("Last lookup", searched),
+                ("Not covered", "Other bridges, unknown router contracts and unsupported message formats."),
+            ]),
+            self.text("An empty result is not proof that no unfinished transfer exists outside this coverage.",
+                      12, INK_3),
+        ]))
 
     def next_step(self, item, _description=None):
         ready = item["status"] in {"ready", "caller_required"}
@@ -944,6 +1430,7 @@ class InboxUI:
 
         async def copy(_):
             await self.clipboard.set(transaction)
+            self.notify("Transaction JSON copied")
         return ft.Container(ft.Column([
             self.text("Unsigned recovery transaction", 15, INK, ft.FontWeight.W_700),
             self.text("The source transfer, destination nonce and caller were rechecked, and the mint was simulated. This transaction has not been signed or sent.", 13, INK_2),
@@ -965,12 +1452,71 @@ class InboxUI:
     async def scan(self, _=None, *, mode: str = "wallet", log_index: int | None = None) -> None:
         if self.state.busy:
             return
+        search = self.tx_input.value if mode == "transaction" else self.wallet_input.value or self.state.wallet
+        blocks = int(self.history.value or "2000")
+        ending = self.history_ending.value if mode == "wallet" else "latest"
+        end_block = (self.end_block.value or "") if ending == "block" else ""
+        end_time = (self.end_time.value or "").strip() if ending == "time" else ""
+        # Catch a malformed address or hash at the field, before any network call and
+        # without discarding the results already on screen.
+        problem = lookup_error(mode, search or "", end_block)
+        if problem:
+            target = (self.tx_input if mode == "transaction" else
+                      self.end_block if problem.endswith("end block.") else self.wallet_input)
+            if target is self.end_block and not self.show_history:
+                self.show_history = True
+                self.render()
+            self.set_input_error(problem, target)
+            if self._installed:
+                try:
+                    # Enter submits and Flutter then drops focus; put the caret back at the end of the value
+                    # so the fix is one keystroke away.
+                    await target.focus()
+                    end = len(target.value or "")
+                    target.selection = ft.TextSelection(base_offset=end, extent_offset=end)
+                    target.update()
+                except (RuntimeError, TimeoutError):
+                    pass  # Cosmetic: the session may have closed.
+            return
+        self.set_input_error("", None)
+        self.last_lookup = {"mode": mode, "search": search or "", "blocks": blocks, "end_block": end_block,
+                            "end_time": end_time, "log_index": log_index}
         self.clear_receipt_editor()
         self.state.busy = True
         self.render()
-        search = self.tx_input.value if mode == "transaction" else self.wallet_input.value or self.state.wallet
-        await self.state.scan(self.service, search or "", int(self.history.value or "2000"),
-                              self.end_block.value or "", mode=mode, log_index=log_index)
+        await self.state.scan(self.service, search or "", blocks, end_block,
+                              end_time=end_time, mode=mode, log_index=log_index)
+        self.render()
+
+    def restore_lookup(self, lookup: dict) -> None:
+        self.show_transaction = lookup["mode"] == "transaction"
+        entry = self.tx_input if self.show_transaction else self.wallet_input
+        entry.value = lookup["search"]
+        if lookup["mode"] == "wallet":
+            self.history.value = str(lookup["blocks"])
+            self.end_block.value = lookup["end_block"]
+            self.end_time.value = lookup["end_time"]
+            self.history_ending.value = "time" if lookup["end_time"] else "block" if lookup["end_block"] else "latest"
+
+    async def retry(self, _=None) -> None:
+        lookup = self.last_lookup
+        if lookup and not self.state.busy:
+            self.restore_lookup(lookup)
+            await self.scan(mode=lookup["mode"], log_index=lookup["log_index"])
+
+    async def widen(self, _=None) -> None:
+        wider = wider_window((self.last_lookup or {}).get("blocks") or int(self.history.value or "2000"))
+        if wider is None or self.state.busy:
+            return
+        if self.last_lookup and self.last_lookup["mode"] == "wallet":
+            self.restore_lookup(self.last_lookup)
+        self.history.value = str(wider)
+        await self.scan()
+
+    def clear_filter(self, _=None) -> None:
+        self.state.filter = "all"
+        self.state.query = ""
+        self.search_input.value = ""
         self.render()
 
     async def scan_index(self, _=None) -> None:
@@ -983,6 +1529,7 @@ class InboxUI:
         self.show_history = True
         self.wallet_input.value = LIVE_SAMPLE_WALLET
         self.end_block.value = str(LIVE_SAMPLE_END_BLOCK)
+        self.history_ending.value = "block"
         self.history.value = str(LIVE_SAMPLE_BLOCKS)
         await self.scan()
 
@@ -1001,9 +1548,12 @@ class InboxUI:
         # Drop the previous page's financial state before processing its new URL.
         # In-flight reads keep their old InboxState and cannot replace this route.
         self.state = InboxState()
+        self.drop_recheck()
         self.clear_receipt_editor()
         self.review_error = ""
         self.refresh_error = ""
+        self.input_error, self.input_error_field = "", None
+        self.last_lookup = None
         self.show_transaction = False
         self.render()
         await self.open_case(route, reset_scroll=not initial_mount)
@@ -1092,10 +1642,107 @@ class InboxUI:
                 self._receipt_request = None
                 self.render()
 
-    async def refresh_transfer(self, _=None) -> None:
+    def recheck_eligible(self, item: dict | None) -> bool:
+        return (item is not None and not self.state.example and not item.get("example")
+                and not str(item.get("key", "")).startswith("example-")
+                and item.get("status") in RECHECK_STATUSES)
+
+    def rechecking(self, run: Recheck | None) -> bool:
+        """True while this run still belongs to the selected, waiting, error-free transfer."""
+        item = self.state.selected
+        return (run is not None and run is self._recheck and run.active and run.state is self.state
+                and item is not None and item.get("key") == run.key and self.recheck_eligible(item)
+                and not self.refresh_error)
+
+    def recheck_label(self, run: Recheck) -> str:
+        return "Checking now" if self.refreshing else f"Checking again in {run.remaining} s"
+
+    def recheck_line(self, item: dict):
+        self._recheck_text = None
+        run = self._recheck
+        if run is None or run.state is not self.state or item.get("key") != run.key:
+            return None
+        if run.note:
+            return self.text(run.note, 12, INK_3) if self.recheck_eligible(item) else None
+        if not self.rechecking(run):
+            return None
+        self._recheck_text = self.text(self.recheck_label(run), 12, INK_2, mono=True)
+        stop = self.link("Stop", self.stop_recheck, color=INK_2, flush=True)
+        stop.style.alignment = ft.Alignment.CENTER_RIGHT  # Keep the short label on the proof's right edge.
+        return ft.Row([self._recheck_text, ft.Container(expand=True), stop], spacing=12)
+
+    def start_recheck(self) -> None:
+        item = self.state.selected
+        if not self._installed or not self.recheck_eligible(item):
+            return
+        self._recheck = Recheck(self.state, item["key"], self.recheck_clock())
+        self.page.run_task(self.recheck_loop, self._recheck)
+
+    def drop_recheck(self, _=None) -> None:
+        if self._recheck is not None:
+            self._recheck.active = False
+        self._recheck = None
+
+    def stop_recheck(self, _=None) -> None:
+        if self._recheck is not None:
+            self.drop_recheck()
+            self.render()
+
+    def show_recheck_countdown(self, run: Recheck) -> None:
+        line = self._recheck_text
+        if line is None or not self.rechecking(run) or not self.client_connected:
+            return
+        line.value = self.recheck_label(run)
+        try:
+            line.update()
+        except RuntimeError as exc:
+            # The countdown is cosmetic. Before the line reaches the client, the next render shows it.
+            if str(exc) != "Session closed" and "must be added to the page" not in str(exc):
+                raise
+
+    async def recheck_loop(self, run: Recheck) -> None:
+        """Recheck the selected waiting transfer every RECHECK_SECONDS, one request at a time."""
+        try:
+            while self.rechecking(run):
+                for remaining in range(RECHECK_SECONDS, 0, -1):
+                    run.remaining = remaining
+                    self.show_recheck_countdown(run)
+                    await self.recheck_sleep(1)
+                    if not self.rechecking(run):
+                        return
+                if self.recheck_clock() - run.started >= RECHECK_LIMIT_SECONDS:
+                    run.active = False
+                    run.note = "Stopped checking after 10 min. Refresh this transfer to check again."
+                    if self.client_connected:
+                        self.render()
+                    return
+                if (not self.client_connected or self.state.busy or self.refreshing or self.preparing
+                        or self._receipt_request is not None):
+                    continue
+                run.remaining = RECHECK_SECONDS
+                await self.refresh_transfer(recheck=run)
+        except asyncio.CancelledError:
+            if run is self._recheck:
+                self.drop_recheck()
+                if self.client_connected:
+                    self.render()
+            raise
+        finally:
+            run.active = False
+
+    async def refresh_transfer(self, _=None, *, recheck: Recheck | None = None) -> None:
         state, item = self.state, self.state.selected
+        connection_generation = self._connection_generation
         if state.busy or state.example or item is None or self.refreshing or self.preparing or self._receipt_request is not None:
             return
+        if recheck is not None and (not self.rechecking(recheck) or not self.client_connected):
+            return
+
+        def accepts_result():
+            return (self.state is state and state.selected is item
+                    and (recheck is None or (self.rechecking(recheck) and self.client_connected
+                                            and self._connection_generation == connection_generation)))
+
         self.refreshing = True
         self.refresh_error = ""
         state.prepared = None
@@ -1106,7 +1753,7 @@ class InboxUI:
             transfers = result["transfers"]
             if len(transfers) != 1 or transfers[0]["key"] != item["key"]:
                 raise ValueError("The original supported burn was not found in its current source receipt.")
-            if self.state is state and state.selected is item:
+            if accepts_result():
                 fresh = transfers[0] | {"discovery_source": item.get("discovery_source", "receipt")}
                 state.transfers = [fresh if row["key"] == item["key"] else row for row in state.transfers]
                 state.selected = fresh
@@ -1115,11 +1762,12 @@ class InboxUI:
                     state.filter = "all"
                     state.query = ""
         except Exception as exc:
-            if self.state is state and state.selected is item:
+            if accepts_result():
                 self.refresh_error = f"Refresh failed. Showing the previous result. {safe_error(exc)}"
         finally:
             self.refreshing = False
-            self.render()
+            if self.client_connected:
+                self.render()
 
     async def replay_mint(self, _=None) -> None:
         item = self.state.selected
@@ -1163,7 +1811,7 @@ class InboxUI:
     async def copy_demo_wallet(self, _=None) -> None:
         if self.state.example:
             await self.clipboard.set(EXAMPLE_WALLET)
-            self.page.show_dialog(ft.SnackBar(content=self.text("Demo wallet copied", color="#FFFFFF")))
+            self.notify("Demo wallet address copied")
 
     def return_live(self, _=None) -> None:
         self.clear_receipt_editor()
@@ -1181,11 +1829,14 @@ class InboxUI:
         changed = item is not self.state.selected
         if changed:
             self.clear_receipt_editor()
+            self.drop_recheck()
         self.state.selected = item
         self.state.prepared = None
         self.caller_input.value = ""
         self.review_error = ""
         self.refresh_error = ""
+        if changed:
+            self.start_recheck()  # Before render, so the first frame already shows the countdown.
         self._revealing_item = item if changed and self.motion_enabled else None
         self.render()
         if self._installed and changed and (reset_scroll or self.motion_enabled):
@@ -1218,6 +1869,7 @@ class InboxUI:
 
     def back(self, _=None) -> None:
         self.clear_receipt_editor()
+        self.drop_recheck()
         self.state.selected = None
         self.state.prepared = None
         self.render()
@@ -1256,10 +1908,15 @@ class InboxUI:
 
     def about(self, _=None) -> None:
         self.page.show_dialog(self.dialog("How Rebound works", [
-            ("Rebound discovers supported source burns, asks Circle for their signed messages, and checks whether Arc has already consumed each nonce.", 14, INK_2),
-            ("An eligible recovery completes that same transfer to the recipient encoded in its message. It does not send USDC a second time or change the recipient.", 14, INK_2),
-            ("Coverage is limited to the displayed route and history range. Unknown router contracts, unsupported messages and restricted callers can need a different recovery path.", 13, INK_2),
-        ], "Close"))
+            self.text("Rebound checks three records for each transfer before it offers an action.", 13, INK_2),
+            self.dialog_rows([
+                ("Burn on Base Sepolia", "The source receipt holds the burn event, its block and the amount."),
+                ("Circle attestation", "Circle's signed message must match that burn exactly."),
+                ("Mint on Arc Testnet", "Arc's used-nonce record shows whether the mint already happened."),
+            ], numbered=True),
+            self.text("A recovery completes that same transfer to the recipient in the signed message. "
+                      "It does not send USDC a second time and cannot change the recipient.", 13, INK_2),
+        ]))
 
 
 def build_main(service):

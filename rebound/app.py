@@ -92,7 +92,16 @@ def create_app(recovery: RecoveryService | None = None, *, include_ui: bool = Tr
     @api.get("/api/scan")
     async def scan(wallet: Annotated[str, Query(pattern=WALLET_PATTERN)],
                    blocks: Annotated[int, Query(ge=1, le=50000)] = 2000,
-                   end_block: Annotated[int | None, Query(ge=0)] = None):
+                   end_block: Annotated[int | None, Query(ge=0)] = None,
+                   end_time: Annotated[str | None, Query(
+                       min_length=16, max_length=40,
+                       description="UTC end time, e.g. 2026-11-20 07:30 or 2026-11-20T07:30:00Z. "
+                                   "Cannot be combined with end_block.")] = None):
+        if end_time is not None:
+            if end_block is not None:
+                raise HTTPException(400, "Use either end_block or end_time, not both.")
+            return await checked(recovery.scan, wallet, blocks=blocks, end_block=end_block,
+                                 end_time=end_time)
         return await checked(recovery.scan, wallet, blocks=blocks, end_block=end_block)
 
     @api.post("/api/prepare")
@@ -182,7 +191,7 @@ def create_app(recovery: RecoveryService | None = None, *, include_ui: bool = Tr
                     payload = {"logs": rows}
             if not isinstance(payload, dict) or not isinstance(payload.get("logs"), list):
                 raise ValueError("Expected an object containing an event logs list.")
-            accepted = await asyncio.to_thread(recovery.ingest_logs, payload["logs"])
+            accepted = await asyncio.to_thread(recovery.ingest_logs, payload["logs"], signed=bool(signature_headers))
             return {"accepted": accepted,
                     "note": "Candidates only; chain verification is required before recovery."}
         except (ValueError, TypeError, RecursionError) as exc:
