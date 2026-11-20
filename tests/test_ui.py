@@ -48,10 +48,34 @@ def test_history_window_mounts_only_the_active_input_and_fits_both_layouts(width
         app.history_ending.value = choice
         panel = app.history_window()
         fields = panel.controls[0]
-        assert fields.controls == [app.history_ending] + ([active] if active else [])
+        assert fields.controls == [app.history_ending_accessibility] + ([active] if active else [])
         if width == 390:
             assert isinstance(fields, ui.ft.Column)
-            assert all(control.width is None for control in fields.controls)
+            assert app.history_ending.width is None
+            assert active is None or active.width is None
+
+
+@pytest.mark.parametrize(("anchor", "expected", "calls"), [
+    ("9" * 16, "", [int("9" * 16)]),
+    ("9" * 17, "Use at most 16 digits for the end block.", []),
+    ("1x" * 9, "Use digits only for the end block.", []),
+])
+async def test_end_block_length_and_numeric_validation_keep_the_same_boundary(anchor, expected, calls):
+    class Scanner:
+        def __init__(self):
+            self.calls = []
+
+        async def scan(self, _wallet, *, blocks, end_block):
+            self.calls.append(end_block)
+            return {"transfers": [], "coverage": "Fixed test window"}
+    wallet = "0x" + "11" * 20
+    assert ui.lookup_error("wallet", wallet, anchor) == expected
+    service, state = Scanner(), ui.InboxState()
+    await state.scan(service, wallet, 200, anchor)
+    assert service.calls == calls
+    assert state.scanned is bool(calls)
+    if len(anchor) > 16 and anchor.isdecimal():
+        assert state.error == expected
 
 
 def test_related_amounts_preserve_large_uint256_fractional_units():

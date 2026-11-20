@@ -167,8 +167,11 @@ def lookup_error(mode: str, search: str, end_block: str = "") -> str:
     if not WALLET_FORMAT.fullmatch(value):
         return "Enter the full wallet address: 0x followed by 40 hex characters."
     anchor = (end_block or "").strip()
-    if mode == "wallet" and anchor and (not anchor.isascii() or not anchor.isdecimal() or len(anchor) > 16):
-        return "Use digits only for the end block."
+    if mode == "wallet" and anchor:
+        if not anchor.isascii() or not anchor.isdecimal():
+            return "Use digits only for the end block."
+        if len(anchor) > 16:
+            return "Use at most 16 digits for the end block."
     return ""
 
 
@@ -346,8 +349,10 @@ class InboxState:
                     result = await service.scan_stream(wallet)
                 else:
                     anchor = end_block.strip()
-                    if anchor and (not anchor.isascii() or not anchor.isdecimal() or len(anchor) > 16):
+                    if anchor and (not anchor.isascii() or not anchor.isdecimal()):
                         raise ValueError("Enter a Base Sepolia end block using digits only.")
+                    if len(anchor) > 16:
+                        raise ValueError("Use at most 16 digits for the end block.")
                     options = {"end_block": int(anchor)} if anchor else {}
                     if end_time and end_time.strip():
                         if anchor:
@@ -420,11 +425,14 @@ class InboxUI:
             filled=True, fill_color=SURFACE, border_color=RULE_STRONG, focused_border_color=ACCENT,
             border_radius=6, content_padding=ft.Padding.symmetric(horizontal=12, vertical=6),
         )
+        # Flet's visual Dropdown label does not name its web accessibility button.
+        self.history_accessibility = ft.Semantics(content=self.history, label="Block window")
         self.history_ending = ft.Dropdown(value="latest", width=188, text_size=13, dense=True,
             options=[ft.DropdownOption("latest", "Latest blocks"), ft.DropdownOption("block", "End block"),
                      ft.DropdownOption("time", "End time (UTC)")], on_select=self.change_history_ending,
             filled=True, fill_color=SURFACE, border_color=RULE_STRONG, focused_border_color=ACCENT,
             border_radius=6, content_padding=ft.Padding.symmetric(horizontal=12, vertical=6))
+        self.history_ending_accessibility = ft.Semantics(content=self.history_ending, label="History ending")
         self.end_block = ft.TextField(hint_text="Base Sepolia end block", width=230, height=40,
                                       keyboard_type=ft.KeyboardType.NUMBER, on_submit=self.scan,
                                       on_change=self.input_changed,
@@ -679,11 +687,12 @@ class InboxUI:
         else:
             entry = self.wallet_input
             action = self.button("Find transfers", self.scan, primary=True, disabled=busy, height=48)
-            extras = [self.history]
+            extras = [self.history_accessibility]
         self.sync_input_error()
         if self.narrow:
             entry.expand = False
-            self.history.expand = True
+            self.history.expand = False
+            self.history_accessibility.expand = True
             self.history.width = None
             # On phones the form stacks, so the message goes straight under the field it is about.
             form = ft.Column([entry, self.input_error_notice, ft.Row([*extras, action], spacing=8)], spacing=8,
@@ -691,6 +700,7 @@ class InboxUI:
         else:
             entry.expand = True
             self.history.expand = False
+            self.history_accessibility.expand = False
             self.history.width = 176
             form = ft.Row([entry, *extras, action], spacing=8)
         options = [self.link("Search by wallet" if self.show_transaction else "Search by transaction",
@@ -766,7 +776,7 @@ class InboxUI:
         ending = self.history_ending.value
         anchor = self.end_block if ending == "block" else self.end_time if ending == "time" else None
         self.history_ending.width = None if self.narrow else 188
-        controls = [self.history_ending]
+        controls = [self.history_ending_accessibility]
         if anchor is not None:
             anchor.width = None if self.narrow else 280 if ending == "time" else 230
             controls.append(anchor)
