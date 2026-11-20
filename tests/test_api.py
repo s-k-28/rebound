@@ -1,4 +1,7 @@
+import asyncio
+
 import httpx
+import pytest
 
 from tests.test_protocol import WALLET
 
@@ -38,6 +41,28 @@ async def test_invalid_scan_is_rejected_before_any_upstream_work(setup_service):
         assert (await client.get("/api/scan", params={"wallet": "not-a-wallet"})).status_code == 422
         assert (await client.get("/api/scan", params={"wallet": WALLET, "blocks": 50001})).status_code == 422
         assert (await client.get("/api/scan", params={"wallet": WALLET, "end_block": -1})).status_code == 422
+
+
+async def test_browser_and_api_share_admission_and_cancellation_releases_queue_space(setup_service):
+    from rebound.app import create_app
+
+    service, _ = setup_service
+    service._admission_limit = 1
+    await service._scan_slots.acquire()
+    await service._scan_slots.acquire()
+    browser_scan = asyncio.create_task(service.scan(WALLET, blocks=150))
+    await asyncio.sleep(0)
+    app = create_app(service, include_ui=False)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/scan", params={"wallet": WALLET, "blocks": 150})
+        assert response.status_code == 429
+        assert response.headers["retry-after"] == "5"
+        browser_scan.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await browser_scan
+        service._scan_slots.release()
+        service._scan_slots.release()
+        assert (await client.get("/api/scan", params={"wallet": WALLET, "blocks": 150})).status_code == 200
 
 
 async def test_api_preserves_real_discovery_and_disabled_stream_semantics(setup_service):

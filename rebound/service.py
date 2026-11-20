@@ -3,6 +3,7 @@
 import asyncio
 import os
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from urllib.parse import urlsplit
@@ -50,6 +51,10 @@ class SourceChanged(ValueError):
 
 
 class AmbiguousBurn(ValueError):
+    pass
+
+
+class BusyError(UpstreamError):
     pass
 
 
@@ -129,13 +134,15 @@ class RecoveryService:
         self.store = CandidateStore(settings.database)
         self._scan_slots = asyncio.Semaphore(2)
         self._read_slots = asyncio.Semaphore(3)
+        self._admitted = 0
+        self._admission_limit = 8
         self._log_chunk_size = 1000
         self._readiness_lock = asyncio.Lock()
         self._readiness_cache: dict | None = None
         self._readiness_expires = 0.0
 
     async def _verify_chain(self, rpc: Rpc, chain: int, contract: str):
-        chain_id, code = await asyncio.gather(
+        chain_id, code = await _gather_reads(
             rpc.call("eth_chainId"), rpc.call("eth_getCode", [contract, "latest"]),
         )
         if quantity(chain_id) != chain:
@@ -146,6 +153,17 @@ class RecoveryService:
             raise UpstreamError(f"{rpc.label} could not verify the required contract.") from exc
         if not present:
             raise UpstreamError(f"{rpc.label} has no deployed contract at the required address.")
+
+    @asynccontextmanager
+    async def _admit(self):
+        if self._admitted >= self._admission_limit:
+            raise BusyError("Rebound is checking other transfers. Try again in a few seconds.")
+        self._admitted += 1
+        try:
+            async with asyncio.timeout(120), self._scan_slots:
+                yield
+        finally:
+            self._admitted -= 1
 
     async def readiness(self) -> dict:
         async def probe(check) -> str:
@@ -196,7 +214,7 @@ class RecoveryService:
             raise ValueError("History must contain between 1 and 50,000 source blocks.")
         if end_block is not None and (type(end_block) is not int or end_block < 0):
             raise ValueError("End block must be a non-negative block number.")
-        async with self._scan_slots:
+        async with self._admit():
             await self._verify_chain(self.base, 84532, p.MESSENGER)
             latest = quantity(await self.base.call("eth_blockNumber"))
             if end_block is not None and end_block > latest:
@@ -251,7 +269,7 @@ class RecoveryService:
         wallet = p.address(wallet)
         if not self.settings.stream_enabled:
             raise ValueError("The Stream index is not enabled on this server.")
-        async with self._scan_slots:
+        async with self._admit():
             burns = self.store.candidates(wallet, stream_only=True)
             transfers = []
             if burns:
@@ -273,7 +291,7 @@ class RecoveryService:
 
     async def inspect_transaction(self, tx_hash: str, *, log_index: int | None = None) -> dict:
         tx_hash = p.hash32(tx_hash)
-        async with self._scan_slots:
+        async with self._admit():
             await self._verify_chain(self.base, 84532, p.MESSENGER)
             receipt_burns = await self._receipt_burns(tx_hash)
             burns = [burn for burn in receipt_burns if burn.destination_domain == 26]
@@ -417,7 +435,7 @@ class RecoveryService:
         tx_hash = p.hash32(tx_hash)
         if type(log_index) is not int or log_index < 0:
             raise ValueError("Event log index must be a non-negative integer.")
-        async with self._read_slots:
+        async with self._admit():
             await self._verify_chain(self.base, 84532, p.MESSENGER)
             burn = await self._receipt_burn(tx_hash, log_index)
             if burn.hook:
@@ -521,6 +539,10 @@ class RecoveryService:
         tx_hash, caller = p.hash32(tx_hash), p.address(caller)
         if not isinstance(log_index, int) or isinstance(log_index, bool) or log_index < 0:
             raise ValueError("Event log index must be a non-negative integer.")
+        async with self._admit():
+            return await self._prepare(tx_hash, log_index, caller)
+
+    async def _prepare(self, tx_hash: str, log_index: int, caller: str) -> dict:
         await self._verify_chain(self.base, 84532, p.MESSENGER)
         burn = await self._receipt_burn(tx_hash, log_index)
         if burn.hook:

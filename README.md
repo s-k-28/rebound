@@ -27,6 +27,10 @@ uv run --env-file .env uvicorn rebound.app:app --host 127.0.0.1 --port 8765
 
 Keep `.env`, RPC credentials and signing keys out of Git. `REBOUND_DB` selects a writable SQLite path. Set `REBOUND_STREAM_SECURITY_TOKEN` to validate QuickNode signatures, or use `REBOUND_STREAM_SECRET` for local adapter checks. Ingestion is disabled by default. Production hosting additionally needs HTTPS, durable storage and an abuse/load review.
 
+`/api/health` checks that the app is running. `/api/ready` checks both chain IDs and configured contracts, plus Circle’s Base-to-Arc fee route. A readiness result reports which provider failed. Use the live sample to verify the full attestation and receipt path.
+
+The browser and API share a bounded verification queue. When it fills, the API returns 429 with a retry delay and the inbox shows a retry message. The same time limit covers both queueing and active verification. [OWASP API resource consumption](https://api-security.owasp.org/editions/2023/en/0xa4-unrestricted-resource-consumption/)
+
 ## Find and prepare transfers
 
 The browser app scans by public address. It displays the exact source block range and whether results are partial. An empty inbox means no supported transfers were found **within the stated coverage**, not that the wallet has no unfinished transfers anywhere.
@@ -139,6 +143,8 @@ These are existing Circle contracts; Rebound has not deployed a new protocol. Se
 uv run pytest
 uv run ruff check .
 ```
+
+Use `uv run python scripts/watch_prs.py --interval 900 --hours 6` to record pull requests and changed heads every 15 minutes. The watcher uses the authenticated GitHub CLI. Review and merge decisions use the exact tested head.
 
 Protocol tests exercise message fields, recipient/caller/amount matching, malformed input, nonce completion and expiry. Service tests use HTTP-level fixtures around the real discovery/reconciliation code. CLI tests use a fixed throwaway key and isolated RPC doubles: they verify caller and chain guards, fee caps, confirmation, fresh revalidation, signed sender, exactly one broadcast attempt and receipt evidence. These automated tests do not prove that a real testnet recovery has been executed.
 

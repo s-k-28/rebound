@@ -1,4 +1,5 @@
 """Python/Flutter transfer inbox; financial state is supplied by RecoveryService."""
+import asyncio
 import json
 import re
 from dataclasses import dataclass, field
@@ -8,13 +9,14 @@ from urllib.parse import urlsplit, urlunsplit
 
 import flet as ft
 
+from rebound.clients import UpstreamError
 from rebound.examples import EXAMPLE_WALLET, example_stream_transfer, example_transfers
 from rebound.protocol import ZERO, address, hash32
 
 INK = "#172823"
-MUTED = "#718078"
+MUTED = "#52665C"
 BLUE = "#28624F"
-GROUND = "#F4F6F3"
+GROUND = "#F0F4F1"
 LINE = "#E0E6E0"
 GREEN = "#28624F"
 AMBER = "#A96714"
@@ -60,7 +62,7 @@ def shorten(value: str | None, size: int = 6) -> str:
 
 
 def safe_error(exc: Exception) -> str:
-    if isinstance(exc, ValueError) or type(exc).__name__ == "UpstreamError":
+    if isinstance(exc, (ValueError, UpstreamError)):
         return str(exc)
     return "The transfer could not be verified. Try again or use a narrower history range."
 
@@ -213,9 +215,25 @@ class InboxUI:
             border_color="transparent", border_radius=8, content_padding=10,
             on_change=self.search, autocorrect=False)
         self.ledger_host = ft.Container()
-        self.inspector_host = ft.Container(width=342)
+        self.inspector_host = ft.Container()
+        self.inspector_scroll = ft.Column([self.inspector_host], scroll=ft.ScrollMode.AUTO, expand=True,
+                                         horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
+        self.workspace_view = ft.Column(spacing=20, scroll=ft.ScrollMode.AUTO, expand=True,
+                                        horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
+        self.split_body = ft.Row([
+            ft.Container(self.workspace_view, expand=True),
+            ft.Container(self.inspector_scroll, width=368),
+        ], spacing=24, vertical_alignment=ft.CrossAxisAlignment.STRETCH)
+        self.header_host = ft.Container()
+        self.body_host = ft.Container(expand=True)
+        self.main = ft.Column([self.header_host, self.body_host], spacing=0, expand=True,
+                              horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
         self.review_host = ft.Container(visible=False)
         self.clipboard = ft.Clipboard()
+        self.semantics = ft.SemanticsService()
+        self.motion_enabled = False
+        self._revealing_item = None
+        self._installed = False
 
     def install(self) -> None:
         self.page.title = "Rebound · Transfer inbox"
@@ -225,9 +243,19 @@ class InboxUI:
         self.page.fonts = {"Manrope": "/fonts/Manrope.ttf"}
         self.page.theme = ft.Theme(color_scheme_seed=BLUE, font_family="Manrope", use_material3=True)
         self.page.services.append(self.clipboard)
+        self.page.services.append(self.semantics)
         self.page.on_resize = self.resize
         self.page.add(self.root)
+        self._installed = True
         self.render()
+
+    async def load_motion_preference(self) -> None:
+        try:
+            async with asyncio.timeout(1):
+                features = await self.semantics.get_accessibility_features()
+        except (RuntimeError, ValueError, TimeoutError):
+            return
+        self.motion_enabled = not (features.disable_animations or features.reduce_motion)
 
     def resize(self, _=None) -> None:
         self.render()
@@ -235,6 +263,10 @@ class InboxUI:
     @property
     def narrow(self) -> bool:
         return (self.page.width or 1100) < 720
+
+    @property
+    def split_workspace(self) -> bool:
+        return (self.page.width or 1100) >= 1180
 
     def text(self, value, size=14, color=INK, weight=None, **kwargs):
         return ft.Text(str(value), size=size, color=color, weight=weight, **kwargs)
@@ -280,29 +312,31 @@ class InboxUI:
         self.end_block.disabled = self.state.busy
         self.caller_input.disabled = self.preparing
         self.search_input.value = self.state.query
-        content = [self.workspace_heading(), self.scan_panel(), self.metrics()]
+        self.inspector_host.animate_opacity = None
+        self.inspector_host.opacity = 0.88 if self._revealing_item is not None and self._revealing_item is self.state.selected else 1
+        content = []
         if self.state.example:
-            content.insert(0, ft.Container(ft.Row([
+            content.append(ft.Container(ft.Row([
                 ft.Icon(ft.Icons.SCIENCE_OUTLINED, color=AMBER, size=17),
                 self.text("Demo wallet · simulated transfers", 12, AMBER, expand=True),
                 ft.TextButton("Return to live", on_click=self.return_live, style=ft.ButtonStyle(color=AMBER)),
             ]), bgcolor="#FFF3DF", padding=ft.Padding.symmetric(horizontal=16, vertical=4), border_radius=9))
-        if (self.page.width or 1200) >= 1180:
+        if self.split_workspace:
             self.inspector_host.content = self.inspector() if self.state.selected else self.recovery_note()
-            content.append(ft.Row([
-                ft.Container(self.inbox(), expand=True),
-                self.inspector_host,
-            ], spacing=20, vertical_alignment=ft.CrossAxisAlignment.START))
+            content.extend([self.workspace_heading(), self.scan_panel(), self.metrics(), self.inbox(), self.footer()])
         elif self.state.selected:
-            content.append(self.inspector())
+            self.inspector_host.content = self.inspector()
+            content.extend([
+                ft.TextButton("Back to inbox", icon=ft.Icons.WEST_ROUNDED, on_click=self.back),
+                self.inspector_host,
+            ])
         else:
-            content.append(self.inbox())
-        content.append(self.footer())
-        body = ft.Column(content, spacing=22, scroll=ft.ScrollMode.AUTO, expand=True,
-                         horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
-        main = ft.Column([self.header(), ft.Container(body, padding=20 if self.narrow else 30, expand=True)],
-                         spacing=0, expand=True, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
-        self.root.controls = ([self.sidebar()] if not self.narrow else []) + [main]
+            content.extend([self.workspace_heading(), self.scan_panel(), self.metrics(), self.inbox(), self.footer()])
+        self.workspace_view.controls = content
+        self.body_host.content = self.split_body if self.split_workspace else self.workspace_view
+        self.body_host.padding = 20 if self.narrow else 26
+        self.header_host.content = self.header()
+        self.root.controls = ([self.sidebar()] if not self.narrow else []) + [self.main]
         self.page.update()
 
     def logo(self, *, dark=False):
@@ -369,8 +403,8 @@ class InboxUI:
 
     def workspace_heading(self):
         return ft.Row([
-            ft.Column([self.text("Transfer inbox", 27, INK, ft.FontWeight.W_700),
-                       self.text("Find the transfer. Understand its state. Finish the original journey.", 12, MUTED)], spacing=7, expand=True),
+            ft.Column([self.text("Transfer inbox", 29 if self.narrow else 35, INK, ft.FontWeight.W_700),
+                       self.text("Find a transfer and check whether it reached Arc.", 13, MUTED)], spacing=7, expand=True),
             ft.TextButton("Explore examples", icon=ft.Icons.PLAY_CIRCLE_OUTLINE_ROUNDED,
                           on_click=self.examples, disabled=self.state.busy, style=ft.ButtonStyle(color=BLUE)),
         ], spacing=15)
@@ -397,7 +431,7 @@ class InboxUI:
             else:
                 self.tx_input.expand = True
                 form = ft.Row([self.tx_input, button], spacing=12)
-        elif self.narrow or (self.page.width or 1200) < 1100:
+        elif (self.page.width or 1200) < (1320 if self.split_workspace else 1100):
             form = ft.Column([self.wallet_input, ft.Row([self.history, button], wrap=True, spacing=12)],
                              spacing=13, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
             self.wallet_input.expand = False
@@ -472,7 +506,7 @@ class InboxUI:
                 border=ft.Border(bottom=ft.BorderSide(2, BLUE if active else "transparent")),
                 on_click=lambda _: self.set_filter(key))
         filters = ft.Row([tab("All transfers", "all"), tab("Needs attention", "attention"), tab("Completed", "completed")], spacing=0, wrap=True)
-        compact_tools = self.narrow or bool(self.state.selected and (self.page.width or 1200) < 1300)
+        compact_tools = self.narrow or (self.split_workspace and (self.page.width or 1200) < 1400)
         top = ft.Column([filters, self.search_input], spacing=6) if compact_tools else ft.Row([filters, ft.Container(expand=True), self.search_input])
         self.ledger_host.content = self.ledger_content()
         children = [ft.Container(top, padding=ft.Padding.only(left=10, right=14, top=10)),
@@ -491,7 +525,7 @@ class InboxUI:
                 ]), padding=ft.Padding.symmetric(horizontal=20, vertical=10), bgcolor="#F8FAF7"))
             children.extend(self.transfer_row(item) for item in visible)
         else:
-            empty_title = "No matching transfers" if self.state.scanned else "A fresh start for unfinished transfers."
+            empty_title = "No matching transfers" if self.state.scanned else "Search for a transfer"
             empty_body = ("Enter the original Base Sepolia transaction hash above." if self.show_transaction
                           else "Enter a public wallet address above. We'll reconstruct supported transfers and check what still needs to happen.")
             if self.state.scanned:
@@ -544,10 +578,9 @@ class InboxUI:
         steps = [("Source burn", "Find the original event on Base Sepolia."),
                  ("Circle attestation", "Match the signed message to that transfer."),
                  ("Destination receipt", "Check whether Arc already finished the mint.")]
-        controls = [ft.Container(ft.Icon(ft.Icons.CALL_RECEIVED_ROUNDED, size=26, color=MINT),
+        controls = [ft.Container(ft.Icon(ft.Icons.ALT_ROUTE_ROUNDED, size=26, color=MINT),
                     width=49, height=49, bgcolor="#2B5546", border_radius=14, alignment=ft.Alignment.CENTER),
-                    self.text("Every transfer\nhas a trail.", 25, "#FFFFFF", ft.FontWeight.W_700),
-                    self.text("Follow the evidence, then take the right next step.", 12, "#BCD0C2")]
+                    self.text("What Rebound checks", 24, "#FFFFFF", ft.FontWeight.W_700)]
         for label, description in steps:
             controls.append(ft.Row([ft.Container(width=7, height=7, bgcolor=MINT, border_radius=4),
                 ft.Column([self.text(label, 12, "#FFFFFF", ft.FontWeight.W_600),
@@ -683,7 +716,7 @@ class InboxUI:
         # loses Flutter keyboard focus and selection after the first character.
         self.ledger_host.content = self.ledger_content()
         self.ledger_host.update()
-        if selection_cleared and (self.page.width or 1200) >= 1180:
+        if selection_cleared and self.split_workspace:
             self.inspector_host.content = self.recovery_note()
             self.inspector_host.update()
 
@@ -927,12 +960,28 @@ class InboxUI:
         self.render()
 
     def inspect(self, item) -> None:
+        changed = item is not self.state.selected
         self.state.selected = item
         self.state.prepared = None
         self.caller_input.value = ""
         self.review_error = ""
         self.refresh_error = ""
+        self._revealing_item = item if changed and self.motion_enabled else None
         self.render()
+        if self._installed and changed:
+            self.page.run_task(self.finish_inspector_reveal, item)
+
+    async def finish_inspector_reveal(self, item: dict) -> None:
+        if self._revealing_item is item:
+            await asyncio.sleep(0.035)
+            if self.state.selected is not item or self._revealing_item is not item:
+                return
+            self._revealing_item = None
+            self.inspector_host.animate_opacity = ft.Animation(180, ft.AnimationCurve.EASE_OUT_CUBIC)
+            self.inspector_host.opacity = 1
+            self.inspector_host.update()
+        if self.split_workspace and self.state.selected is item:
+            await self.inspector_scroll.scroll_to(offset=0, duration=0)
 
     def back(self, _=None) -> None:
         self.state.selected = None
@@ -990,5 +1039,6 @@ def build_main(service):
     async def main(page: ft.Page):
         ui = InboxUI(page, service)
         ui.install()
+        await ui.load_motion_preference()
         await ui.open_case(page.route)
     return main

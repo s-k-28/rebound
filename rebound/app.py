@@ -17,7 +17,7 @@ from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from rebound.service import RecoveryService, Settings, UpstreamError
+from rebound.service import BusyError, RecoveryService, Settings, UpstreamError
 
 WALLET_PATTERN = r"^0x[0-9a-fA-F]{40}$"
 HASH_PATTERN = r"^0x[0-9a-fA-F]{64}$"
@@ -61,7 +61,6 @@ def create_app(recovery: RecoveryService | None = None, *, include_ui: bool = Tr
     api = FastAPI(title="Rebound", version="0.1.0", lifespan=lifespan,
                   description="Testnet transfer discovery and unsigned recovery preparation. No web signing.")
     api.state.recovery = recovery
-    slots = asyncio.Semaphore(2)
 
     @api.get("/api/health")
     async def health():
@@ -77,10 +76,11 @@ def create_app(recovery: RecoveryService | None = None, *, include_ui: bool = Tr
 
     async def checked(operation, *args, **kwargs):
         try:
-            async with asyncio.timeout(120), slots:
-                return await operation(*args, **kwargs)
+            return await operation(*args, **kwargs)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except BusyError as exc:
+            raise HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": "5"}) from exc
         except UpstreamError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except TimeoutError as exc:

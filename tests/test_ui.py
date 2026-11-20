@@ -213,6 +213,9 @@ def test_page_can_render_each_example_detail_and_narrow_layout():
         def update(self):
             pass
 
+        def run_task(self, _handler, *_args):
+            pass
+
     page = Page()
     app = ui.InboxUI(page, RecordingService())
     app.install()
