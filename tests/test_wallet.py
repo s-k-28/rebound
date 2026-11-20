@@ -722,7 +722,7 @@ def test_adapter_stops_without_a_valid_one_time_code(tmp_path):
     for code in ("", "x" * 5):
         run = run_adapter(tmp_path, stored_transaction(), code=code)
         assert run["calls"] == [] and [post["path"] for post in run["posts"]] in ([], ["/exchange"])
-        assert "Open it again from Rebound" in run["status"] or "already used" in run["status"]
+        assert run["status"] == "Reopen this wallet connection from the Rebound tab."
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed")
