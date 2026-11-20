@@ -96,7 +96,7 @@ Branches: `caller_required`, `expired`, `unsupported`, `unavailable`, `source_ch
 
 ## 8. Interaction and visual design
 
-The interface resembles a calm transfer inbox. Cool white `#F3F6FA`, white `#FFFFFF`, navy ink `#142E4A`, cobalt action `#2D5BFF`, sea-green success `#137E69`, amber waiting `#A96714`. Use readable sans typography, restrained surfaces and a visual route connecting source and destination. Avoid fictional balances or “funds recovered” totals.
+The initial frontend was rejected as generic. The revised interface is a developed finance workspace: persistent navigation, compact transfer rows, derived status counts and a selected-transfer inspector. Forest ink `#173B32`, action `#28624F`, mint `#C9E8D8`, paper `#F4F6F3`, charcoal text `#172823`, and restrained amber waiting states. Use bundled Manrope typography and a state-driven route connecting source and destination. Avoid fictional balances or “funds recovered” totals. [Design sources](DESIGN-SOURCES.md) records the niche template studios and the original implementation decisions.
 
 ```
 Rebound                         Base Sepolia → Arc Testnet    Testnet
