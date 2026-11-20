@@ -180,7 +180,7 @@ async def test_stream_search_never_scans_source_history_and_records_delivery_tim
     assert service.ingest_logs([burn_log()]) == 1
     result = await service.scan_stream(WALLET)
     assert "eth_getLogs" not in seen
-    assert result["source"] == "quicknode_streams" and result["delivered"] == 1
+    assert result["source"] == "stream_index" and result["delivered"] == 1
     row = result["transfers"][0]
     assert row["discovery_source"] == "stream" and row["source_verified"] is True
     assert isinstance(row["stream_received_at"], int)
@@ -199,7 +199,7 @@ async def test_stream_search_reports_no_block_coverage_it_cannot_prove(setup_ser
     service.ingest_logs([burn_log()])
     result = await service.scan_stream(WALLET)
     assert result["from_block"] is None and result["to_block"] is None
-    assert "does not report block coverage" in result["coverage"]
+    assert "Block coverage is unknown" in result["coverage"]
 
 
 async def test_empty_stream_search_is_not_an_error_and_makes_no_rpc_calls(setup_service):
@@ -229,7 +229,7 @@ async def test_provider_outage_after_a_delivery_is_named_and_not_an_empty_inbox(
         raise UpstreamError("Base Sepolia is unavailable. Retry or configure another RPC.")
 
     service.base.call = down
-    with pytest.raises(UpstreamError, match="QuickNode delivered 1 matching burn.*could not finish verifying it.*Retry"):
+    with pytest.raises(UpstreamError, match="Stream index has 1 matching burn.*could not finish verifying it.*Retry"):
         await service.scan_stream(WALLET)
 
 

@@ -39,8 +39,8 @@ class Settings:
     database: str = "data/rebound.sqlite3"
     stream_secret: str = ""
     stream_security_token: str = ""
-    # Public address used by the QuickNode walkthrough. The default is the throwaway
-    # testnet wallet documented in docs/LIVE-RECOVERY.md; it holds no mainnet assets.
+    # Public address used by the QuickNode walkthrough. The default is the testnet
+    # sample wallet documented in docs/LIVE-RECOVERY.md.
     quicknode_demo_wallet: str = "0x395809d8da4a70145d5060448070a15367df722c"
 
     def __post_init__(self):
@@ -435,7 +435,7 @@ class RecoveryService:
             }
 
     async def scan_stream(self, wallet: str) -> dict:
-        """Find a wallet's transfers from burns QuickNode Streams delivered to this server.
+        """Find a wallet's transfers from burns stored by the Stream endpoint.
 
         Reads the persisted Stream index only. There is no source ``eth_getLogs``
         history scan, so an empty result means nothing was delivered for this
@@ -456,23 +456,20 @@ class RecoveryService:
                 except UpstreamError as exc:
                     count = min(len(burns), 100)
                     raise UpstreamError(
-                        f"QuickNode delivered {count} matching burn{'s' if count != 1 else ''} for this address, "
+                        f"The Stream index has {count} matching burn{'s' if count != 1 else ''} for this address, "
                         f"but Rebound could not finish verifying {'them' if count != 1 else 'it'}. {exc} Retry shortly."
                     ) from exc
             return {"wallet": wallet, "from_block": None, "to_block": None, "partial": len(burns) > 100,
-                    "source": "quicknode_streams", "delivered": len(burns),
-                    # QuickNode does not report which blocks it has covered, and a delivered burn
-                    # only proves that one block, so no block range is claimed here.
-                    "coverage": "Burns delivered to this server's QuickNode Stream endpoint. Rebound did not scan Base Sepolia history, "
-                                "and QuickNode does not report block coverage here.",
+                    "source": "stream_index", "delivered": len(burns),
+                    "coverage": "Stream endpoint records for this address. Rebound did not scan Base Sepolia "
+                                "history. Block coverage is unknown.",
                     "transfers": transfers}
 
     def stream_status(self, wallet: str) -> dict:
         """What the Stream index holds for a wallet. Reads the index only, no RPC.
 
-        ``delivered`` counts only burns whose delivery carried a valid QuickNode
-        signature. ``local`` counts shared-secret adapter deliveries, which test the
-        endpoint but are not evidence that QuickNode sent anything.
+        ``delivered`` counts indexed burns with an accepted HMAC. It measures
+        endpoint authentication. ``local`` counts shared-secret adapter records.
         """
         wallet = p.address(wallet)
         summary = self.store.stream_summary(wallet) if self.settings.stream_enabled else {"signed": 0, "last_signed": None, "local": 0}
