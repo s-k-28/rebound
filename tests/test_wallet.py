@@ -62,6 +62,7 @@ def arc_transaction(state) -> dict | None:
     if variant == "missing":
         return None
     return {"hash": ARC_HASH, "from": OTHER if variant == "wrong_sender" else WALLET, "to": p.TRANSMITTER,
+            "value": "0x0", "blockHash": BLOCK_HASH, "blockNumber": "0x2bc", "transactionIndex": "0x0",
             "input": "0x57ecfd28" + "00" * 64 if variant == "wrong_input" else state.get("sent_data", "0x")}
 
 
@@ -380,11 +381,13 @@ async def test_reopening_a_transfer_resumes_its_unresolved_attempt(wallet_servic
     await approve(manager, session)
     manager.claim(session.id)
     manager.close(session.id)  # The dialog closed while the wallet was open.
-    assert manager.open(TX, LOG) is session  # The same attempt, not a second session.
-    manager.report(session.id, "unknown")
-    assert manager.open(TX, LOG) is session
-    manager.release(session.id)
+    assert manager.open(TX, LOG, owned_session_id=session.id) is session
     assert manager.open(TX, LOG) is not session
+    manager.report(session.id, "unknown")
+    assert manager.open(TX, LOG, owned_session_id=session.id) is session
+    manager.release(session.id)
+    manager.close(session.id)
+    assert manager.open(TX, LOG, owned_session_id=session.id) is not session
 
 
 async def test_release_is_refused_while_a_wallet_confirmation_can_still_submit(wallet_service):
@@ -881,7 +884,8 @@ async def test_flet_panel_reviews_sends_and_shows_only_the_verified_receipt(wall
     assert [b.content for b in review_buttons if isinstance(b, ft.FilledButton)] == ["Send from wallet"]
     assert all(b.icon is None for b in review_buttons)
 
-    await panel.send()
+    send, = [b for b in review_buttons if b.content == "Send from wallet"]
+    await send.on_click(None)
     assert session.state == "approved"
     assert any("Confirm the transaction in your wallet" in text for text in texts(panel.dialog.content))
     panel.sessions.claim(session.id)
@@ -929,8 +933,10 @@ async def test_flet_send_carries_the_review_on_screen(wallet_service):
     panel.open()
     await panel.sessions.connect(panel.session.id, WALLET, "0x4cef52")
     panel.refresh()  # The user sees the review for WALLET.
+    old_send, = [b for b in buttons(panel.dialog.content) if b.content == "Send from wallet"]
     await panel.sessions.connect(panel.session.id, OTHER, "0x4cef52")  # The wallet tab switches account.
-    await panel.send()  # A click on the stale review.
+    panel.refresh()  # A new button has been produced, but the old event arrives late.
+    await old_send.on_click(None)
     assert panel.session.state == "reviewed" and panel.session.account == OTHER
     assert "review changed" in panel.local_error and panel.sessions.holder(TX, LOG) is None
 
@@ -943,7 +949,8 @@ async def test_flet_panel_resumes_the_same_attempt_after_the_dialog_closes(walle
     first.open()
     await first.sessions.connect(first.session.id, WALLET, "0x4cef52")
     first.refresh()
-    await first.send()
+    send, = [b for b in buttons(first.dialog.content) if b.content == "Send from wallet"]
+    await send.on_click(None)
     first.sessions.claim(first.session.id)
     first.close()
     second = wallet_ui.WalletPanel(inbox, READY)
@@ -955,3 +962,21 @@ async def test_flet_panel_resumes_the_same_attempt_after_the_dialog_closes(walle
     second.refresh()  # A status update keeps the field and what was typed.
     assert second.hash_input in controls(second.dialog.content) and second.hash_input.value == ARC_HASH
     assert "My wallet sent nothing" in [b.content for b in buttons(second.dialog.content)]
+
+
+async def test_flet_transfer_does_not_share_wallet_session_across_clients(wallet_service):
+    service, _ = wallet_service
+    first = wallet_ui.WalletPanel(ui.InboxUI(Page(), service), READY)
+    first.open()
+    await first.sessions.connect(first.session.id, WALLET, "0x4cef52")
+    await approve(first.sessions, first.session)
+    first.sessions.claim(first.session.id)
+    first.sessions.report(first.session.id, "unknown")
+    first.close()
+
+    second = wallet_ui.WalletPanel(ui.InboxUI(Page(), service), READY)
+    second.open()
+    assert second.session.state == "created" and second.session.account is None
+    assert second.session.code != first.session.code
+    assert "My wallet sent nothing" not in [b.content for b in buttons(second.dialog.content)]
+    assert second.sessions.holder(TX, LOG) is first.session

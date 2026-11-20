@@ -59,7 +59,11 @@ def wallet_available(inbox, item: dict) -> bool:
 def wallet_button(inbox, item: dict):
     if not wallet_available(inbox, item):
         return None
-    return inbox.button("Finish with browser wallet", lambda _: WalletPanel(inbox, item).open(), primary=True)
+
+    async def open_panel(_):
+        WalletPanel(inbox, item).open()
+
+    return inbox.button("Finish with browser wallet", open_panel, primary=True)
 
 
 def gwei(wei: int) -> str:
@@ -74,6 +78,7 @@ class WalletPanel:
         self.page = inbox.page
         self.item = item
         self.sessions = sessions_for(inbox.service)
+        self.transfer = (item["tx_hash"].lower(), item["log_index"])
         self.session = None
         self.dialog = None
         self.is_open = False
@@ -85,7 +90,7 @@ class WalletPanel:
         self.copied = None
         self.seen = -1
         self.sending_since = None
-        self.shown = None  # (generation, transaction) of the review on screen.
+        self.showing_send_delay = False
         # One field for the panel's life, so status re-renders never drop a typed hash.
         self.hash_input = ft.TextField(hint_text="Transaction hash from your wallet's activity, 0x…",
                                        **field_style())
@@ -93,12 +98,13 @@ class WalletPanel:
     # Lifecycle -----------------------------------------------------------------
 
     def open(self) -> None:
+        attempts = self.inbox._wallet_sessions
         try:
-            # Reopening a transfer whose attempt is still unresolved resumes that same session.
-            self.session = self.sessions.open(self.item["tx_hash"], self.item["log_index"])
+            self.session = self.sessions.open(*self.transfer, owned_session_id=attempts.get(self.transfer))
         except (SessionConflict, ValueError) as exc:
             self.page.show_dialog(ft.SnackBar(content=self.inbox.text(str(exc), color=SURFACE)))
             return
+        attempts[self.transfer] = self.session.id
         self.opened_tab = self.session.state != "created"
         self.dialog = ft.AlertDialog(modal=True, bgcolor=SURFACE, scrollable=True,
                                      shape=ft.RoundedRectangleBorder(radius=8),
@@ -111,8 +117,10 @@ class WalletPanel:
     def close(self, _=None) -> None:
         self.is_open = False
         confirmed = self.session is not None and self.session.state == "confirmed"
-        if self.session is not None:
-            self.sessions.close(self.session.id)  # Kept while it holds the transfer.
+        attempts = self.inbox._wallet_sessions
+        if self.session is not None and self.sessions.close(self.session.id):
+            if attempts.get(self.transfer) == self.session.id:
+                del attempts[self.transfer]
         self.page.pop_dialog()
         if confirmed:
             self.page.run_task(self.inbox.refresh_transfer)
@@ -132,7 +140,7 @@ class WalletPanel:
                 self.expired = True
                 self.refresh()
                 return
-            if session.version != self.seen or session.state == "sending":
+            if session.version != self.seen or (self.send_is_delayed() and not self.showing_send_delay):
                 self.refresh()
             if session.state in FINAL:
                 return
@@ -144,6 +152,8 @@ class WalletPanel:
         if self.dialog is None:
             return
         self.seen = self.session.version if self.session else -1
+        if self.session and self.session.state != "sending":
+            self.sending_since = None
         self.dialog.content = ft.Container(self.body(), width=460)
         self.dialog.actions = [self.inbox.link("Close", self.close)]
         if update and self.is_open:
@@ -156,7 +166,7 @@ class WalletPanel:
         self.refresh()
 
     async def act(self, operation) -> None:
-        if self.busy:
+        if self.busy or not self.is_open:
             return
         self.busy = True
         self.local_error = ""
@@ -173,13 +183,6 @@ class WalletPanel:
 
     async def check_again(self, _=None) -> None:
         await self.act(lambda: self.sessions.review(self.session.id))
-
-    async def send(self, _=None) -> None:
-        if self.shown is None:
-            return
-        generation, transaction = self.shown
-        await self.act(lambda: self.sessions.approve(self.session.id, generation=generation,
-                                                     transaction=transaction))
 
     async def verify(self, _=None) -> None:
         await self.act(lambda: self.sessions.verify(self.session.id))
@@ -285,6 +288,8 @@ class WalletPanel:
             if s.error:
                 controls.extend([self.error(s.error), ft.Row([self.inbox.button(
                     "Check again", self.check_again, disabled=self.busy)])])
+                if not s.reviewing:
+                    controls.append(self.reopen_button())
         elif state == "reviewed":
             controls.extend(self.review_controls())
         elif state == "approving":
@@ -308,26 +313,32 @@ class WalletPanel:
         return ft.Column(controls, spacing=12, tight=True, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
 
     def connect_controls(self):
-        ui = self.inbox
         controls = [
             self.figure("Original transfer", display_amount(self.item.get("amount")), "USDC", first=True),
             self.line("Rebound opens a wallet tab. It connects your wallet extension and switches it to Arc Testnet. "
                       "You review and approve the transaction here; the tab only passes it to your wallet.", INK_2, 13),
         ]
-        connect = ui.button("Open wallet tab again" if self.opened_tab else "Connect wallet", self.tab_opened,
-                            primary=not self.opened_tab)
-        # The client opens the tab inside the click, so browsers do not block it as a popup.
-        connect.url = ft.Url(adapter_link(self.page, self.session.code), target=ft.UrlTarget.BLANK)
+        connect = self.reopen_button(initial=not self.opened_tab)
         if self.opened_tab:
             controls.extend(self.progress("Waiting for your wallet. Approve the connection and Arc Testnet in the wallet tab."))
         controls.extend([ft.Row([connect]),
                          self.line("No private key or seed phrase is requested. Testnet only.", INK_3, 12)])
         return controls
 
+    def reopen_button(self, *, initial=False):
+        # Open directly from the browser click so popup controls allow it.
+        url = ft.Url(adapter_link(self.page, self.session.code), target=ft.UrlTarget.BLANK)
+        return self.inbox.button("Connect wallet" if initial else "Open wallet tab again", self.tab_opened,
+                                 primary=initial, disabled=self.busy, url=url)
+
     def review_controls(self):
         s = self.session
         review = s.review
-        self.shown = (s.generation, dict(s.transaction))
+        generation, transaction = s.generation, dict(s.transaction)
+
+        async def send(_):
+            await self.act(lambda: self.sessions.approve(s.id, generation=generation, transaction=transaction))
+
         shortfall = review["shortfall_usdc"] != "0"
         amount, fee, net = aligned_amounts(review["amount"], review["fee"], review["net_amount"])
         controls = [
@@ -355,9 +366,10 @@ class WalletPanel:
         if s.error:
             controls.append(self.error(s.error))
         controls.append(ft.Row([
-            self.inbox.button("Sending…" if self.busy else "Send from wallet", self.send, primary=True,
+            self.inbox.button("Sending…" if self.busy else "Send from wallet", send, primary=True,
                               disabled=self.busy or shortfall),
             self.inbox.button("Check again", self.check_again, disabled=self.busy),
+            self.reopen_button(),
         ], wrap=True, spacing=8))
         if review.get("warning"):
             controls.append(self.line(review["warning"], INK_3, 12))
@@ -368,10 +380,15 @@ class WalletPanel:
             self.sending_since = self.sending_since or time.monotonic()
         controls = self.progress("Confirm the transaction in your wallet. The wallet tab passes it the reviewed "
                                  "transaction with the gas limit and fee caps shown in the review.")
-        if self.sending_since and time.monotonic() - self.sending_since > SENDING_PATIENCE_SECONDS:
+        self.showing_send_delay = self.send_is_delayed()
+        if self.showing_send_delay:
             controls.append(self.line("No answer from the wallet tab yet. If you confirmed, paste the hash from your "
                                       "wallet's activity below."))
         return controls
+
+    def send_is_delayed(self) -> bool:
+        return (self.session.state == "sending" and self.sending_since is not None
+                and time.monotonic() - self.sending_since > SENDING_PATIENCE_SECONDS)
 
     def submitted_controls(self):
         s = self.session
@@ -408,8 +425,7 @@ class WalletPanel:
         return controls
 
     def recovery_tools(self):
-        """Kept mounted whenever a send may have happened. Release is offered only once the
-        wallet tab can no longer submit (unknown or unrelated), never while approving or sending."""
+        """Keep the hash field mounted while a send may have happened."""
         s = self.session
         self.hash_input.disabled = self.busy
         buttons = [self.inbox.button("Verify this hash", self.verify_pasted,
@@ -420,7 +436,7 @@ class WalletPanel:
             buttons.append(self.inbox.button("My wallet sent nothing", self.release, disabled=self.busy))
         controls.append(ft.Row(buttons, wrap=True, spacing=8))
         if s.state in {"unknown", "unrelated"}:
-            controls.append(self.line("Release only after checking the wallet's activity and rejecting any pending "
-                                      "request. Another send for this transfer stays blocked on this server until "
-                                      "this one is resolved.", INK_3, 12))
+            controls.append(self.line("First reject any pending Rebound request in your wallet. Then check its "
+                                      "activity. Release only once you have confirmed it sent nothing for this "
+                                      "transfer.", INK_3, 12))
         return controls

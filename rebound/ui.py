@@ -246,6 +246,7 @@ class InboxUI:
         self.page = page
         self.service = service
         self.state = InboxState()
+        self._wallet_sessions: dict[tuple[str, int], str] = {}
         self.wallet_input = ft.TextField(hint_text="Wallet address, 0x…", height=48,
                                          on_submit=self.scan, **field_style())
         self.tx_input = ft.TextField(hint_text="Base Sepolia transaction hash, 0x…", height=48,
