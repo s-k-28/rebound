@@ -314,12 +314,19 @@ async def test_failed_scan_cancels_other_ranges_before_returning(setup_service):
     app, _ = setup_service
     original = app.base.call
     cancelled = asyncio.Event()
+    first_read = asyncio.Event()
+
     async def failing(method, params=None):
+        if method == "eth_blockNumber":
+            return hex(2000)
         if method != "eth_getLogs":
             return await original(method, params)
         first = int(params[0]["fromBlock"], 16)
         if first == 0:
-            await asyncio.sleep(0)
+            first_read.set()
+            return [burn_log()]
+        if first == 1000:
+            await first_read.wait()
             raise UpstreamError("Cannot read range")
         try:
             await asyncio.sleep(10)
@@ -327,13 +334,7 @@ async def test_failed_scan_cancels_other_ranges_before_returning(setup_service):
             cancelled.set()
         return []
     app.base.call = failing
-    # Use a high source head so this actually starts multiple1,000-block ranges.
-    original_failing = app.base.call
-    async def high_head(method, params=None):
-        if method == "eth_blockNumber":
-            return hex(2000)
-        return await original_failing(method, params)
-    app.base.call = high_head
     with pytest.raises(UpstreamError):
         await app.scan(WALLET, blocks=3000)
     assert cancelled.is_set()
+    assert app.store.candidates(WALLET) == []

@@ -32,17 +32,20 @@ class CandidateStore:
             db.execute("CREATE INDEX IF NOT EXISTS by_recipient ON candidates(recipient)")
             db.commit()
 
-    def save(self, burn: Burn, log: dict, *, from_stream: bool = False) -> None:
+    def save_many(self, entries: list[tuple[Burn, dict]], *, from_stream: bool = False) -> None:
+        if not entries:
+            return
         with closing(sqlite3.connect(self.path, timeout=10)) as db:
-            db.execute("""INSERT INTO candidates
+            db.executemany("""INSERT INTO candidates
                 (tx_hash, log_index, depositor, recipient, block_number, payload, stream_block_hash)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(tx_hash, log_index) DO UPDATE SET
                 depositor=excluded.depositor, recipient=excluded.recipient,
                 block_number=excluded.block_number, payload=excluded.payload,
                 stream_block_hash=COALESCE(excluded.stream_block_hash, candidates.stream_block_hash)""",
-                (burn.tx_hash, burn.log_index, burn.depositor, burn.mint_recipient,
-                 burn.block_number, json.dumps(log), burn.block_hash if from_stream else None))
+                ((burn.tx_hash, burn.log_index, burn.depositor, burn.mint_recipient,
+                  burn.block_number, json.dumps(log), burn.block_hash if from_stream else None)
+                 for burn, log in entries))
             db.commit()
 
     def candidates(self, wallet: str, limit: int = 101, *, block_range: tuple[int, int] | None = None,

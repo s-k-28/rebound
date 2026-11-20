@@ -103,17 +103,17 @@ class RecoveryService:
     def ingest_logs(self, logs: list[dict]) -> int:
         if not isinstance(logs, list) or len(logs) > 5000:
             raise ValueError("Provide at most 5,000 event logs per ingestion request.")
-        accepted = 0
+        candidates = []
         for log in logs:
             try:
                 burn = p.decode_burn(log)
                 if burn.destination_domain != 26:
                     continue
-                self.store.save(burn, log, from_stream=True)
-                accepted += 1
+                candidates.append((burn, log))
             except (ValueError, KeyError, TypeError, AttributeError):
                 continue
-        return accepted
+        self.store.save_many(candidates, from_stream=True)
+        return len(candidates)
 
     async def scan(self, wallet: str, blocks: int = 2000, *, end_block: int | None = None) -> dict:
         wallet = p.address(wallet)
@@ -154,15 +154,15 @@ class RecoveryService:
                     try:
                         burn = p.decode_burn(log)
                         if first <= burn.block_number <= last and burn.destination_domain == 26 and wallet in (burn.depositor, burn.mint_recipient):
-                            self.store.save(burn, log)
-                            matched.append(burn)
+                            matched.append((burn, log))
                     except (ValueError, KeyError, TypeError, AttributeError):
                         continue
                 return matched
 
             # Any failed chunk fails this scan rather than pretending history was complete.
             size = self._log_chunk_size
-            await _gather_reads(*(read_chunk(first, min(first + size - 1, end)) for first in range(start, end + 1, size)))
+            batches = await _gather_reads(*(read_chunk(first, min(first + size - 1, end)) for first in range(start, end + 1, size)))
+            await asyncio.to_thread(self.store.save_many, [entry for batch in batches for entry in batch])
             burns = self.store.candidates(wallet, block_range=(start, end) if end_block is not None else None)
             transfers = await self._inspect_candidates(burns, latest)
             indexed = ", plus previously indexed candidates" if end_block is None else " (fixed range)"
