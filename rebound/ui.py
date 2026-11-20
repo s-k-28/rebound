@@ -423,6 +423,7 @@ class InboxUI:
         self.page = page
         self.service = service
         self.state = InboxState()
+        self._wallet_sessions: dict[tuple[str, int], str] = {}
         self.wallet_input = ft.TextField(hint_text="Wallet address, 0x…", height=48,
                                          on_submit=self.scan, on_change=self.input_changed, **field_style())
         self.tx_input = ft.TextField(hint_text="Base Sepolia transaction hash, 0x…", height=48,
@@ -1372,11 +1373,14 @@ class InboxUI:
                 bgcolor=AMBER_WASH, border=ft.Border.all(1, AMBER_RULE), border_radius=R_CONTROL,
                 padding=ft.Padding.symmetric(horizontal=12, vertical=9)))
         elif ready:
+            from rebound.wallet_ui import wallet_button  # Late: wallet_ui imports ui.
+            wallet = wallet_button(self, item)
             controls.extend([
+                *([wallet] if wallet else []),
                 self.text("Review a destination mint using the address that will actually sign it.", 13, INK_2),
                 self.caller_input,
                 self.button("Checking recovery…" if self.preparing else "Review recovery", self.prepare,
-                            primary=True, disabled=self.preparing or self.refreshing),
+                            primary=wallet is None, disabled=self.preparing or self.refreshing),
                 self.text("No signing happens in this page. Keep private keys out of your browser.", 12, INK_3),
             ])
             if self.review_error:

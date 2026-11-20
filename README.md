@@ -88,7 +88,7 @@ uv sync
 uv run uvicorn rebound.app:app --host 127.0.0.1 --port 8765
 ```
 
-Open `http://127.0.0.1:8765`. The app's UI is written in Python using Flet controls and rendered by Flutter. Application code does not author HTML, CSS or TypeScript. The small JavaScript file under `streams/` is an optional provider-side QuickNode filter, not a web application.
+Open `http://127.0.0.1:8765`. The app's UI is written in Python using Flet controls and rendered by Flutter. The QuickNode filter is a separate provider-side JavaScript file. The optional browser wallet uses a small HTML status page and a JavaScript provider adapter. The transfer review stays in Flet, and the adapter is disabled by default. [Browser-wallet design and test status](docs/WALLET.md)
 
 Default public RPCs can be rate-limited or restrict historical log queries. For your own endpoints, copy `.env.example` to `.env`, update it and launch with:
 

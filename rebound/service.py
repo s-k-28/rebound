@@ -45,6 +45,8 @@ class Settings:
     # Public address used by the QuickNode walkthrough. The default is the testnet
     # sample wallet documented in docs/LIVE-RECOVERY.md.
     quicknode_demo_wallet: str = "0x395809d8da4a70145d5060448070a15367df722c"
+    # Off until a real wallet-extension run on a funded throwaway account passes.
+    browser_wallet: bool = False
 
     def __post_init__(self):
         for endpoint in (self.base_rpc, self.arc_rpc, self.circle_url):
@@ -65,6 +67,7 @@ class Settings:
             stream_security_token=os.getenv("REBOUND_STREAM_SECURITY_TOKEN", ""),
             # An empty value (as in .env.example) means "use the default", not "no wallet".
             quicknode_demo_wallet=os.getenv("REBOUND_QUICKNODE_DEMO_WALLET") or cls.quicknode_demo_wallet,
+            browser_wallet=os.getenv("REBOUND_BROWSER_WALLET") == "1",
         )
 
     @property

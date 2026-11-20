@@ -20,7 +20,7 @@ class Rpc:
         "eth_chainId", "eth_getCode", "eth_blockNumber", "eth_getBlockByNumber",
         "eth_getLogs", "eth_getTransactionReceipt", "eth_call", "eth_estimateGas",
         "eth_getTransactionCount", "eth_gasPrice", "eth_sendRawTransaction",
-        "eth_getBalance",
+        "eth_getBalance", "eth_maxPriorityFeePerGas", "eth_getTransactionByHash",
     })
 
     def __init__(self, url: str, label: str, client: httpx.AsyncClient):
