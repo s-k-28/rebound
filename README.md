@@ -4,7 +4,7 @@ Rebound finds interrupted USDC transfers from a public wallet address. It checks
 
 **Initial route: Base Sepolia → Arc Testnet.** This is a testnet prototype, with a Python/Flet browser interface, a FastAPI backend and a local Python recovery command. Browser wallet signing, public hosting and a recorded end-to-end testnet recovery remain separate release gates. Example transfers are synthetic and labeled; they are never claimable funds.
 
-Read the [PRD](docs/PRD.md), [implementation and release plan](docs/superpowers/plans/2026-11-19-rebound.md), [live demo procedure](docs/DEMO.md) and [QuickNode setup](docs/QUICKNODE.md).
+Read the [PRD](docs/PRD.md), [implementation and release plan](docs/superpowers/plans/2026-11-19-rebound.md), [live demo procedure](docs/DEMO.md), [controlled testnet lab](docs/LAB.md) and [QuickNode setup](docs/QUICKNODE.md).
 
 ![Rebound transfer workspace showing labeled synthetic examples](docs/images/workspace.jpg)
 
@@ -113,7 +113,7 @@ Local Python CLI ────┘          │          ├─ Circle sandbox att
                  Authenticated Stream ingestion
 ```
 
-`protocol.py` owns packed-message decoding and invariant checks. `clients.py` handles RPC and Circle responses. `store.py` indexes candidates. `service.py` discovers and reconciles transfers and prepares unsigned transactions. `ui.py` renders the browser experience. `app.py` mounts the API and Flet. `cli.py` is the only local signing entry point. A Stream or cached row can suggest a transfer to inspect; it cannot authorize a transaction.
+`protocol.py` decodes packed messages and checks invariants. `clients.py` handles RPC and Circle responses. `store.py` indexes candidates. `service.py` discovers and reconciles transfers and prepares unsigned transactions. `ui.py` renders the browser experience. `app.py` mounts the API and Flet. `cli.py` signs recovery transactions locally. A Stream or cached row can suggest a transfer for inspection. The recovery service verifies each transfer independently before preparation.
 
 ### Contracts used
 
@@ -161,7 +161,7 @@ Protocol tests exercise message fields, recipient/caller/amount matching, malfor
 
 The local prototype and its automated checks are distinct from a completed live demonstration. Keep each item below pending until its evidence exists:
 
-- [ ] **Controlled source burn:** confirm a small manual Base Sepolia → Arc Testnet transfer using canonical USDC, an owned recipient and a zero destinationCaller. Stop before destination minting; preserve the source receipt.
+- [ ] **Controlled source burn**. Use the [testnet lab](docs/LAB.md) to rehearse a small manual Base Sepolia → Arc Testnet transfer using canonical USDC, an owned recipient and a zero destination caller. After a funded testnet run, preserve the source receipt before the destination mint.
 - [ ] **Fresh-session discovery:** discard browser/app state, enter only the public wallet address, and discover that burn inside the displayed history range without preloading its hash.
 - [ ] **Actual destination mint:** prepare and approve the testnet recovery locally; preserve the successful Arc receipt and its `MessageReceived` event matching the original nonce and fixed recipient.
 - [ ] **Second attempt blocked as completed:** refresh the inbox and attempt preparation for that same source hash/log. Show completed state and refusal to prepare another mint; do not create a new burn or broadcast a second recovery transaction.
