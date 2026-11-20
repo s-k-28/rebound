@@ -39,12 +39,17 @@ class Settings:
     database: str = "data/rebound.sqlite3"
     stream_secret: str = ""
     stream_security_token: str = ""
+    # Public address used by the QuickNode walkthrough. The default is the throwaway
+    # testnet wallet documented in docs/LIVE-RECOVERY.md; it holds no mainnet assets.
+    quicknode_demo_wallet: str = "0x395809d8da4a70145d5060448070a15367df722c"
 
     def __post_init__(self):
         for endpoint in (self.base_rpc, self.arc_rpc, self.circle_url):
             parsed = urlsplit(endpoint)
             if parsed.scheme not in ("http", "https") or not parsed.netloc:
                 raise ValueError("Upstream endpoints must be valid HTTP(S) URLs.")
+        if self.quicknode_demo_wallet:
+            p.address(self.quicknode_demo_wallet)
 
     @classmethod
     def from_env(cls):
@@ -55,6 +60,8 @@ class Settings:
             database=os.getenv("REBOUND_DB", cls.database),
             stream_secret=os.getenv("REBOUND_STREAM_SECRET", ""),
             stream_security_token=os.getenv("REBOUND_STREAM_SECURITY_TOKEN", ""),
+            # An empty value (as in .env.example) means "use the default", not "no wallet".
+            quicknode_demo_wallet=os.getenv("REBOUND_QUICKNODE_DEMO_WALLET") or cls.quicknode_demo_wallet,
         )
 
     @property
@@ -273,7 +280,7 @@ class RecoveryService:
             self._readiness_expires = time.monotonic() + (30 if ready else 5)
             return self._readiness_cache
 
-    def ingest_logs(self, logs: list[dict]) -> int:
+    def ingest_logs(self, logs: list[dict], *, signed: bool = False) -> int:
         if not isinstance(logs, list) or len(logs) > 5000:
             raise ValueError("Provide at most 5,000 event logs per ingestion request.")
         candidates = []
@@ -285,7 +292,7 @@ class RecoveryService:
                 candidates.append((burn, log))
             except (ValueError, KeyError, TypeError, AttributeError):
                 continue
-        self.store.save_many(candidates, from_stream=True)
+        self.store.save_many(candidates, from_stream=True, signed=signed)
         return len(candidates)
 
     async def _block_at_time(self, timestamp: int, latest: int) -> tuple[int, int]:
@@ -428,25 +435,58 @@ class RecoveryService:
             }
 
     async def scan_stream(self, wallet: str) -> dict:
+        """Find a wallet's transfers from burns QuickNode Streams delivered to this server.
+
+        Reads the persisted Stream index only. There is no source ``eth_getLogs``
+        history scan, so an empty result means nothing was delivered for this
+        address, not that no transfer exists. After discovery each burn is
+        rechecked against its source receipt, Circle's attestation and Arc.
+        """
         wallet = p.address(wallet)
         if not self.settings.stream_enabled:
-            raise ValueError("The Stream index is not enabled on this server.")
+            raise ValueError("QuickNode Streams ingestion is not enabled on this server.")
         async with self._admit():
             burns = self.store.candidates(wallet, stream_only=True)
             transfers = []
             if burns:
-                await self._verify_chain(self.base, 84532, p.MESSENGER)
-                latest = quantity(await self.base.call("eth_blockNumber"))
-                transfers = await self._inspect_candidates(burns, latest)
+                try:
+                    await self._verify_chain(self.base, 84532, p.MESSENGER)
+                    latest = quantity(await self.base.call("eth_blockNumber"))
+                    transfers = await self._inspect_candidates(burns, latest)
+                except UpstreamError as exc:
+                    count = min(len(burns), 100)
+                    raise UpstreamError(
+                        f"QuickNode delivered {count} matching burn{'s' if count != 1 else ''} for this address, "
+                        f"but Rebound could not finish verifying {'them' if count != 1 else 'it'}. {exc} Retry shortly."
+                    ) from exc
             return {"wallet": wallet, "from_block": None, "to_block": None, "partial": len(burns) > 100,
-                    "coverage": "Only received Stream events. The index may not cover all source blocks.",
+                    "source": "quicknode_streams", "delivered": len(burns),
+                    # QuickNode does not report which blocks it has covered, and a delivered burn
+                    # only proves that one block, so no block range is claimed here.
+                    "coverage": "Burns delivered to this server's QuickNode Stream endpoint. Rebound did not scan Base Sepolia history, "
+                                "and QuickNode does not report block coverage here.",
                     "transfers": transfers}
+
+    def stream_status(self, wallet: str) -> dict:
+        """What the Stream index holds for a wallet. Reads the index only, no RPC.
+
+        ``delivered`` counts only burns whose delivery carried a valid QuickNode
+        signature. ``local`` counts shared-secret adapter deliveries, which test the
+        endpoint but are not evidence that QuickNode sent anything.
+        """
+        wallet = p.address(wallet)
+        summary = self.store.stream_summary(wallet) if self.settings.stream_enabled else {"signed": 0, "last_signed": None, "local": 0}
+        return {"wallet": wallet, "enabled": self.settings.stream_enabled, "delivered": summary["signed"],
+                "last_received": summary["last_signed"], "local": summary["local"]}
 
     async def _inspect_candidates(self, burns: list[IndexedBurn], source_head: int) -> list[dict]:
         async def inspect(candidate: IndexedBurn):
             async with self._read_slots:
                 row = await self.diagnose(candidate.burn, source_head=source_head)
                 row["discovery_source"] = "stream" if candidate.from_stream else "rpc"
+                if candidate.from_stream:
+                    row["stream_received_at"] = candidate.received_at
+                    row["stream_signed"] = candidate.signed
                 return row
 
         return await _gather_reads(*(inspect(candidate) for candidate in burns[:100]))
