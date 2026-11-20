@@ -25,20 +25,31 @@ from rebound.service import MIN_RECOVERY_CONFIRMATIONS
 
 # Ledger palette. See docs/DESIGN.md: ink means settled, the one accent means "act here",
 # amber means waiting and red means the record needs review.
-PAPER = "#F3F4F2"
+PAPER = "#EEF1EE"
 SURFACE = "#FFFFFF"
-INK = "#141A17"
-INK_2 = "#48514C"
-INK_3 = "#68706B"
-RULE = "#E1E4E0"
-RULE_STRONG = "#C8CDC8"
-ACCENT = "#1D5A44"
-SELECTED = "#EDF1EE"
+SURFACE_2 = "#F7F9F7"
+INK = "#0E1A14"
+INK_2 = "#3B4841"
+INK_3 = "#586660"
+RULE = "#DCE2DD"
+RULE_STRONG = "#BDC7C0"
+FIELD_BORDER = "#8A968F"
+ACCENT = "#0B6B4A"
+ACCENT_DEEP = "#095A3E"
+SELECTED = "#E3F2EA"
 AMBER = "#9A5B0B"
 AMBER_WASH = "#FBF4E8"
 AMBER_RULE = "#EAD5B2"
 RED = "#A8332B"
 RED_WASH = "#FBEFEE"
+# Radii follow the hierarchy: small marks and links, controls and notices, then panels.
+R_SMALL = 6
+R_CONTROL = 8
+R_PANEL = 12
+# One soft elevation for the main surfaces. Everything else is separated by hairlines.
+PANEL_SHADOW = [ft.BoxShadow(blur_radius=2, offset=ft.Offset(0, 1), color="#120E1A14"),
+                ft.BoxShadow(blur_radius=28, spread_radius=-14, offset=ft.Offset(0, 14), color="#260E1A14")]
+HEADER_SHADOW = ft.BoxShadow(blur_radius=10, spread_radius=-6, offset=ft.Offset(0, 4), color="#1A0E1A14")
 SANS = "Manrope"
 MONO = "PlexMono"
 MONO_MEDIUM = "PlexMonoMedium"
@@ -398,8 +409,9 @@ class Recheck:
 
 
 def field_style(**overrides) -> dict:
-    style = dict(filled=True, fill_color=SURFACE, border_color=RULE_STRONG, focused_border_color=ACCENT,
-                 border_radius=6, cursor_color=ACCENT, autocorrect=False,
+    style = dict(filled=True, fill_color=SURFACE, border_color=FIELD_BORDER, focused_border_color=ACCENT,
+                 border_width=1, focused_border_width=2,
+                 border_radius=R_CONTROL, cursor_color=ACCENT, autocorrect=False,
                  text_style=ft.TextStyle(size=13, font_family=MONO, color=INK),
                  hint_style=ft.TextStyle(size=13, font_family=SANS, color=INK_3),
                  content_padding=ft.Padding.symmetric(horizontal=12, vertical=12))
@@ -431,16 +443,16 @@ class InboxUI:
                      ft.DropdownOption("2000", "2,000 blocks"),
                      ft.DropdownOption("10000", "10,000 blocks"),
                      ft.DropdownOption("50000", "50,000 blocks")],
-            filled=True, fill_color=SURFACE, border_color=RULE_STRONG, focused_border_color=ACCENT,
-            border_radius=6, content_padding=ft.Padding.symmetric(horizontal=12, vertical=6),
+            filled=True, fill_color=SURFACE, border_color=FIELD_BORDER, focused_border_color=ACCENT,
+            border_radius=R_CONTROL, content_padding=ft.Padding.symmetric(horizontal=12, vertical=6),
         )
         # Flet's visual Dropdown label does not name its web accessibility button.
         self.history_accessibility = ft.Semantics(content=self.history, label="Block window")
         self.history_ending = ft.Dropdown(value="latest", width=188, text_size=13, dense=True,
             options=[ft.DropdownOption("latest", "Latest blocks"), ft.DropdownOption("block", "End block"),
                      ft.DropdownOption("time", "End time (UTC)")], on_select=self.change_history_ending,
-            filled=True, fill_color=SURFACE, border_color=RULE_STRONG, focused_border_color=ACCENT,
-            border_radius=6, content_padding=ft.Padding.symmetric(horizontal=12, vertical=6))
+            filled=True, fill_color=SURFACE, border_color=FIELD_BORDER, focused_border_color=ACCENT,
+            border_radius=R_CONTROL, content_padding=ft.Padding.symmetric(horizontal=12, vertical=6))
         self.history_ending_accessibility = ft.Semantics(content=self.history_ending, label="History ending")
         self.end_block = ft.TextField(hint_text="Base Sepolia end block", width=230, height=40,
                                       keyboard_type=ft.KeyboardType.NUMBER, on_submit=self.scan,
@@ -512,7 +524,7 @@ class InboxUI:
                                         on_surface_variant=INK_2, outline=RULE_STRONG, outline_variant=RULE,
                                         surface_tint=SURFACE, error=RED),
             # Clickable rows and tabs use ink: a neutral wash on hover, a stronger one on keyboard focus.
-            splash_color="#00000000", hover_color=PAPER, focus_color=RULE, highlight_color=SELECTED,
+            splash_color="#00000000", hover_color=SURFACE_2, focus_color=RULE, highlight_color=SELECTED,
             divider_color=RULE)
         self.page.services.append(self.clipboard)
         self.page.services.append(self.semantics)
@@ -577,9 +589,10 @@ class InboxUI:
                 else {state.FOCUSED: ft.BorderSide(2, ACCENT), state.DISABLED: ft.BorderSide(1, RULE),
                       state.DEFAULT: ft.BorderSide(1, RULE_STRONG)})
         style = ft.ButtonStyle(
-            bgcolor={state.DISABLED: RULE, state.DEFAULT: ACCENT} if primary else SURFACE,
+            bgcolor=({state.DISABLED: RULE, state.HOVERED: ACCENT_DEEP, state.DEFAULT: ACCENT} if primary
+                     else {state.HOVERED: SURFACE_2, state.DEFAULT: SURFACE}),
             color={state.DISABLED: INK_3, state.DEFAULT: SURFACE if primary else INK},
-            side=side, shape=ft.RoundedRectangleBorder(radius=6), elevation=0,
+            side=side, shape=ft.RoundedRectangleBorder(radius=R_CONTROL), elevation=0,
             padding=ft.Padding.symmetric(horizontal=16, vertical=0),
             text_style=ft.TextStyle(size=13, weight=ft.FontWeight.W_600, font_family=SANS),
             overlay_color="#14FFFFFF" if primary else "#0A141A17")
@@ -593,7 +606,7 @@ class InboxUI:
                              height=self.tap_height, style=ft.ButtonStyle(
                                  color={state.DISABLED: INK_3, state.DEFAULT: color},
                                  padding=ft.Padding.symmetric(horizontal=0 if flush else 6, vertical=0), icon_size=14,
-                                 shape=ft.RoundedRectangleBorder(radius=4),
+                                 shape=ft.RoundedRectangleBorder(radius=R_SMALL),
                                  side={state.FOCUSED: ft.BorderSide(1.5, color),
                                        state.DEFAULT: ft.BorderSide(0, "#00000000")},
                                  overlay_color={state.FOCUSED: "#00000000", state.DEFAULT: "#0A141A17"},
@@ -601,7 +614,7 @@ class InboxUI:
 
     def status_mark(self, status, *, size=13, **kwargs):
         title, _, tone = state_copy(status)
-        return ft.Row([ft.Container(width=7, height=7, border_radius=4, bgcolor=TONES[tone]),
+        return ft.Row([ft.Container(width=8, height=8, border_radius=4, bgcolor=TONES[tone]),
                        self.text(title, size, INK, ft.FontWeight.W_700 if tone == "action" else ft.FontWeight.W_500)],
                       spacing=8, tight=True, **kwargs)
 
@@ -661,11 +674,13 @@ class InboxUI:
                                                     bottom=0 if self.narrow else 6))
 
     def header(self):
-        brand = self.text("Rebound", 16, INK, ft.FontWeight.W_800)
+        mark = ft.Container(width=10, height=10, border_radius=3, bgcolor=ACCENT)
+        brand = ft.Row([mark, self.text("Rebound", 17, INK, ft.FontWeight.W_800)], spacing=9, tight=True,
+                       vertical_alignment=ft.CrossAxisAlignment.CENTER)
         route = self.text("Base Sepolia → Arc Testnet", 13, INK_2, ft.FontWeight.W_500)
-        environment = ft.Container(self.text("Testnet", 11, INK_2, ft.FontWeight.W_700),
-                                   border=ft.Border.all(1, RULE_STRONG), border_radius=3,
-                                   padding=ft.Padding.symmetric(horizontal=6, vertical=1))
+        environment = ft.Container(self.text("Testnet", 11, INK_2, ft.FontWeight.W_700), bgcolor=SURFACE_2,
+                                   border=ft.Border.all(1, RULE_STRONG), border_radius=10,
+                                   padding=ft.Padding.symmetric(horizontal=9, vertical=2))
         links = [self.link("Coverage", self.coverage, color=INK_2), self.link("How it works", self.about, color=INK_2)]
         if self.narrow:
             content = ft.Column([ft.Row([brand, environment, ft.Container(expand=True), *links], spacing=4),
@@ -676,14 +691,14 @@ class InboxUI:
                               ft.Container(expand=True), *links], spacing=14)
             padding = ft.Padding.only(left=28, right=20, top=12, bottom=12)
         return ft.Container(content, bgcolor=SURFACE, border=ft.Border(bottom=ft.BorderSide(1, RULE)),
-                            padding=padding)
+                            padding=padding, shadow=HEADER_SHADOW)
 
     def example_banner(self):
         return ft.Container(ft.Row([
             self.text("Example mode. These transfers are synthetic and nothing here can be signed.",
                       13, AMBER, ft.FontWeight.W_600, expand=True),
             self.link("Return to live", self.return_live, color=AMBER),
-        ], spacing=12), bgcolor=AMBER_WASH, border=ft.Border.all(1, AMBER_RULE), border_radius=6,
+        ], spacing=12), bgcolor=AMBER_WASH, border=ft.Border.all(1, AMBER_RULE), border_radius=R_CONTROL,
             padding=ft.Padding.only(left=14, right=6, top=6, bottom=6))
 
     def scan_panel(self):
@@ -757,7 +772,7 @@ class InboxUI:
         self.input_error_notice.visible = shown
         for entry in (self.wallet_input, self.tx_input, self.end_block):
             invalid = shown and entry is self.input_error_field
-            entry.border_color = RED if invalid else RULE_STRONG
+            entry.border_color = RED if invalid else FIELD_BORDER
             entry.focused_border_color = RED if invalid else ACCENT
 
     def set_input_error(self, message: str, target=None) -> None:
@@ -816,7 +831,7 @@ class InboxUI:
             return ft.Container(ft.Row(parts, spacing=6, tight=True), ink=True, border_radius=0,
                                 padding=ft.Padding.only(left=4, right=4, top=13 if self.narrow else 12,
                                                         bottom=11 if self.narrow else 10),
-                                border=ft.Border(bottom=ft.BorderSide(2, INK if active else "#00000000")),
+                                border=ft.Border(bottom=ft.BorderSide(2, ACCENT if active else "#00000000")),
                                 on_click=lambda _: self.set_filter(key))
         tabs = ft.Row([tab("All" if self.narrow else "All transfers", "all"), tab("Needs attention", "attention"),
                        tab("Completed", "completed")],
@@ -840,7 +855,8 @@ class InboxUI:
             # The progress rule takes the frame's top edge, so the frame itself does not move.
             chrome = [ft.ProgressBar(color=ACCENT, bgcolor=RULE, bar_height=2)]
         return ft.Container(ft.Column([*chrome, self.ledger_host], spacing=0),
-            bgcolor=SURFACE, border_radius=8, border=ft.Border.all(1, RULE), clip_behavior=ft.ClipBehavior.ANTI_ALIAS)
+            bgcolor=SURFACE, border_radius=R_PANEL, border=ft.Border.all(1, RULE), shadow=PANEL_SHADOW,
+            clip_behavior=ft.ClipBehavior.ANTI_ALIAS)
 
     @property
     def has_records(self) -> bool:
@@ -866,20 +882,21 @@ class InboxUI:
                 cells = [self.text(label, 12, INK_3, ft.FontWeight.W_600, width=width, expand=width is None,
                                    text_align=ft.TextAlign.RIGHT if right else None)
                          for label, width, right in self.columns()]
-                children.append(ft.Container(ft.Row(cells, spacing=20),
+                children.append(ft.Container(ft.Row(cells, spacing=20), bgcolor=SURFACE_2,
                                              padding=ft.Padding.symmetric(horizontal=16, vertical=9),
                                              border=ft.Border(bottom=ft.BorderSide(1, RULE))))
             children.extend(self.transfer_row(item) for item in visible)
         else:
             children.append(self.empty_ledger())
         if self.state.coverage:
-            children.append(ft.Container(self.text(self.state.coverage, 12, INK_3),
+            children.append(ft.Container(self.text(self.state.coverage, 12, INK_3), bgcolor=SURFACE_2,
                                          padding=ft.Padding.symmetric(horizontal=16, vertical=11)))
         if self.state.partial:
             children.append(ft.Container(self.text("History is partial. Other transfers may exist outside this coverage.",
                                                    12, AMBER, ft.FontWeight.W_600),
                                          padding=ft.Padding.only(left=16, right=16, bottom=11)))
-        return ft.Column(children, spacing=0)
+        # Stretch so the tinted footer note spans the frame instead of hugging its text.
+        return ft.Column(children, spacing=0, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
 
     def ledger_note(self, lines, actions=()):
         """One state of the ledger body: a lead line, optional detail, optional actions. Shared padding keeps
@@ -1325,7 +1342,7 @@ class InboxUI:
             title=self.text(title, 16, INK, ft.FontWeight.W_700),
             content=ft.Column(controls, spacing=12, tight=True, width=440),
             actions=[self.link(action, lambda _: self.page.pop_dialog())],
-            bgcolor=SURFACE, shape=ft.RoundedRectangleBorder(radius=8), scrollable=True, elevation=0,
+            bgcolor=SURFACE, shape=ft.RoundedRectangleBorder(radius=R_PANEL), scrollable=True, elevation=0,
             inset_padding=ft.Padding.symmetric(horizontal=16, vertical=24) if self.narrow else None,
             title_padding=ft.Padding.only(left=24, right=24, top=20, bottom=0),
             content_padding=ft.Padding.only(left=24, right=24, top=10, bottom=0),
@@ -1350,7 +1367,7 @@ class InboxUI:
         if self.state.example:
             controls.append(ft.Container(
                 self.text("This example cannot prepare or sign a transaction.", 13, AMBER, ft.FontWeight.W_600),
-                bgcolor=AMBER_WASH, border=ft.Border.all(1, AMBER_RULE), border_radius=6,
+                bgcolor=AMBER_WASH, border=ft.Border.all(1, AMBER_RULE), border_radius=R_CONTROL,
                 padding=ft.Padding.symmetric(horizontal=12, vertical=9)))
         elif ready:
             controls.extend([
@@ -1439,11 +1456,11 @@ class InboxUI:
             ft.Row([self.button("Copy transaction JSON", copy, icon=ft.Icons.CONTENT_COPY)], wrap=True),
             self.text("To sign locally", 13, INK, ft.FontWeight.W_700),
             ft.Container(self.text(command, 12, INK, mono=True, selectable=True), bgcolor=PAPER,
-                         border=ft.Border.all(1, RULE), border_radius=4, padding=10),
+                         border=ft.Border.all(1, RULE), border_radius=R_SMALL, padding=10),
             self.text("The local command revalidates the transfer again and asks for confirmation before sending on Arc Testnet. Never paste a private key into this app.", 13, INK_2),
             self.text(prepared.get("warning") or "A successful simulation does not guarantee later execution. Competing attempts can still consume gas.", 12, AMBER, ft.FontWeight.W_600),
         ], spacing=12, horizontal_alignment=ft.CrossAxisAlignment.STRETCH), border=ft.Border.all(1, RULE_STRONG),
-            border_radius=8, padding=16)
+            border_radius=R_CONTROL, padding=16)
 
     async def scan(self, _=None, *, mode: str = "wallet", log_index: int | None = None) -> None:
         if self.state.busy:
