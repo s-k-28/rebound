@@ -19,6 +19,11 @@ AMBER = "#A96714"
 FOREST = "#173B32"
 MINT = "#C9E8D8"
 
+# Historical public burn documented in docs/VALIDATION.md. Status is checked live.
+LIVE_SAMPLE_WALLET = "0x41f7337769003aec9b0b20789403f8c741d7faad"
+LIVE_SAMPLE_END_BLOCK = 61_125_511
+LIVE_SAMPLE_BLOCKS = 200
+
 STATE_COPY = {
     "ready": ("Ready to finish", "A signed message is available. Rebound will recheck it before preparing the destination mint.", BLUE, ft.Icons.NORTH_EAST_ROUNDED),
     "awaiting_attestation": ("Waiting for Circle", "Your source transfer was found. Wait for Circle's attestation, then scan again.", AMBER, ft.Icons.SCHEDULE_ROUNDED),
@@ -167,7 +172,8 @@ class InboxUI:
         self.show_transaction = False
         self.history = ft.Dropdown(
             value="2000", label="Scan length", width=230, text_size=13,
-            options=[ft.DropdownOption("2000", "2,000 source blocks"),
+            options=[ft.DropdownOption("200", "200 source blocks"),
+                     ft.DropdownOption("2000", "2,000 source blocks"),
                      ft.DropdownOption("10000", "10,000 source blocks"),
                      ft.DropdownOption("50000", "50,000 source blocks")],
             filled=True, fill_color="#FFFFFF", border_color=LINE, border_radius=10,
@@ -391,6 +397,8 @@ class InboxUI:
                    icon=ft.Icons.SWAP_HORIZ_ROUNDED, on_click=self.toggle_transaction, disabled=self.state.busy)]
         if not self.show_transaction:
             options.extend(self.history_options())
+            options.append(ft.TextButton("Check a live sample", icon=ft.Icons.FACT_CHECK_OUTLINED,
+                on_click=self.live_sample, disabled=self.state.busy))
             if self.show_history:
                 controls.append(ft.Row([self.end_block, self.text("Use a Base Sepolia block number to revisit an older window.", 11, MUTED)],
                     wrap=True, spacing=12))
@@ -672,6 +680,16 @@ class InboxUI:
 
     async def scan_index(self, _=None) -> None:
         await self.scan(mode="stream")
+
+    async def live_sample(self, _=None) -> None:
+        if self.state.busy:
+            return
+        self.show_transaction = False
+        self.show_history = True
+        self.wallet_input.value = LIVE_SAMPLE_WALLET
+        self.end_block.value = str(LIVE_SAMPLE_END_BLOCK)
+        self.history.value = str(LIVE_SAMPLE_BLOCKS)
+        await self.scan()
 
     async def inspect_transaction(self, _=None) -> None:
         await self.scan(mode="transaction")

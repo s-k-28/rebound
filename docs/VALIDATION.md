@@ -22,12 +22,14 @@ Review found and fixed two edge cases: default Decimal precision could round lar
 
 ## Reproduce the read-only check
 
+Choose **Check a live sample** in the transfer inbox. The app fills the public wallet and fixed block window, then contacts the live Base, Circle and Arc providers. Open the completed transfer and follow **Open verified Arc receipt**.
+
 ```sh
 uv run python -m rebound.cli scan 0x41f7337769003aec9b0b20789403f8c741d7faad --blocks 200 --end-block 61125511
 uv run python -m rebound.cli inspect 0xcfe897ab891b667c9ae538d9d6713c02db167dfd0a058fc6c09313734de0ecbb
 ```
 
-Both commands should report 1 USDC sent, 0.99987 USDC received and a completed Arc mint. The source lookup also identifies log 4 for reproducing a completed-state check.
+Both commands should report 1 USDC sent, 0.99987 USDC received and a completed Arc mint. Running `prepare` on the same hash and log 4 returned the completed-state refusal before producing an unsigned transaction.
 
 ## Runtime checks and limits
 
