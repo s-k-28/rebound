@@ -134,9 +134,7 @@ class InboxState:
         if transfer.get("status") not in {"ready", "caller_required"}:
             raise ValueError("Only a ready transfer can be prepared. Refresh its state first.")
         signer = address(caller.strip())
-        self.prepared = None
-        self.prepared = await service.prepare(transfer["tx_hash"], transfer["log_index"], signer)
-        return self.prepared
+        return await service.prepare(transfer["tx_hash"], transfer["log_index"], signer)
 
 
 class InboxUI:
@@ -165,7 +163,7 @@ class InboxUI:
         self.caller_input = ft.TextField(
             label="Address that will sign the destination transaction", hint_text="0x…",
             text_size=14, filled=True, fill_color="#FFFFFF", border_color=LINE,
-            focused_border_color=BLUE, border_radius=10, autocorrect=False,
+            focused_border_color=BLUE, border_radius=10, autocorrect=False, on_change=self.caller_changed,
         )
         self.review_error = ""
         self.preparing = False
@@ -176,6 +174,7 @@ class InboxUI:
             on_change=self.search, autocorrect=False)
         self.ledger_host = ft.Container()
         self.inspector_host = ft.Container(width=342)
+        self.review_host = ft.Container(visible=False)
         self.clipboard = ft.Clipboard()
 
     def install(self) -> None:
@@ -238,6 +237,7 @@ class InboxUI:
         self.wallet_input.disabled = self.state.busy
         self.history.disabled = self.state.busy
         self.end_block.disabled = self.state.busy
+        self.caller_input.disabled = self.preparing
         self.search_input.value = self.state.query
         content = [self.workspace_heading(), self.scan_panel(), self.metrics()]
         if self.state.example:
@@ -516,8 +516,9 @@ class InboxUI:
             ], spacing=16), padding=ft.Padding.symmetric(horizontal=18, vertical=12))],
             collapsed_bgcolor="#FAFBF9", bgcolor="#FFFFFF", tile_padding=ft.Padding.symmetric(horizontal=20, vertical=4))
         controls.append(evidence)
-        if self.state.prepared:
-            controls.append(self.transaction_review(self.state.prepared))
+        self.review_host.content = self.transaction_review(self.state.prepared) if self.state.prepared else None
+        self.review_host.visible = bool(self.state.prepared)
+        controls.append(self.review_host)
         return ft.Container(ft.Column(controls, spacing=0), bgcolor="#FFFFFF", border=ft.Border.all(1, LINE),
                             border_radius=13, clip_behavior=ft.ClipBehavior.ANTI_ALIAS)
 
@@ -647,16 +648,34 @@ class InboxUI:
         self.state.prepared = None
         self.render()
 
+    def caller_changed(self, _=None) -> None:
+        if self.state.prepared is not None:
+            self.state.prepared = None
+            self.review_host.content = None
+            self.review_host.visible = False
+            self.review_host.update()
+
     async def prepare(self, _=None) -> None:
-        if self.preparing:
+        if self.preparing or self.state.selected is None:
             return
+        state, transfer = self.state, self.state.selected
+        caller = self.caller_input.value or ""
+
+        def still_selected() -> bool:
+            return (self.state is state and state.selected is transfer and not state.example
+                    and self.caller_input.value == caller)
+
         self.preparing = True
         self.review_error = ""
+        state.prepared = None
         self.render()
         try:
-            await self.state.prepare(self.service, self.state.selected, self.caller_input.value or "")
+            prepared = await state.prepare(self.service, transfer, caller)
+            if still_selected():
+                state.prepared = prepared
         except Exception as exc:
-            self.review_error = safe_error(exc)
+            if still_selected():
+                self.review_error = safe_error(exc)
         finally:
             self.preparing = False
             self.render()

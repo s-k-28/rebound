@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from rebound import ui
@@ -13,6 +15,33 @@ class RecordingService:
     async def prepare(self, tx_hash, log_index, caller):
         self.prepared = True
         return {"transaction": {"to": "0x" + "11" * 20}, "recipient": caller}
+
+
+async def test_pending_review_is_discarded_after_switching_transfers(monkeypatch):
+    started = asyncio.Event()
+    finished = asyncio.Event()
+
+    class DelayedService:
+        async def prepare(self, tx_hash, log_index, caller):
+            started.set()
+            await finished.wait()
+            return {"transaction": {"from": caller}, "tx_hash": tx_hash, "log_index": log_index}
+
+    app = ui.InboxUI(object(), DelayedService())
+    monkeypatch.setattr(app, "render", lambda: None)
+    first = {"key": "original", "tx_hash": "0x" + "aa" * 32, "log_index": 2,
+             "example": False, "status": "ready"}
+    second = {**first, "key": "different", "tx_hash": "0x" + "bb" * 32}
+    app.inspect(first)
+    app.caller_input.value = "0x" + "11" * 20
+    preparing = asyncio.create_task(app.prepare())
+    await started.wait()
+    app.inspect(second)
+    finished.set()
+    await preparing
+    assert app.state.selected is second
+    assert app.state.prepared is None
+    assert not app.preparing
 
 
 def test_attention_filter_excludes_completed_but_preserves_waiting():
