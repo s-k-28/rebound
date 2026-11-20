@@ -45,8 +45,8 @@ After [running locally](#run-locally), follow the same steps as the demo video. 
 
 1. **Find by address.** Open `http://127.0.0.1:8765`, paste `0x395809d8da4a70145d5060448070a15367df722c` and select **Check a live sample**. Rebound scans a fixed 200-block Base Sepolia window ending at block 61,175,721 and finds the controlled 1 USDC transfer.
 2. **Read the proof.** Select the row. The inspector shows the verified Base burn, the matched Circle attestation and the completed Arc mint, 99 s after the burn, with a link to the verified Arc receipt.
-3. **Review a recovery.** Open `http://127.0.0.1:8765/transfer/0x9064f18850c6a86cdea854175835f8eabb3a20eb06a2f1598f6fa0675cc950b5/5`, a second real burn that was still unminted on November 20. Under **Finish the transfer**, enter `0x395809d8da4a70145d5060448070a15367df722c` and select **Review recovery**. Rebound simulates `receiveMessage` on Arc and shows the unsigned transaction and gas budget in USDC. If someone has finished it since, the inspector shows **Completed** instead.
-4. **See the duplicate refusal.** Run `uv run python -m rebound.cli prepare 0x7e4334109c120f9da71e01116190804a9d91f2fd5ec07cfd7196a649e68e3f23 4 --caller 0x395809d8da4a70145d5060448070a15367df722c`. It exits with "Transfer is completed. Arc has already consumed this message's nonce."
+3. **Review a recovery.** Open `http://127.0.0.1:8765/transfer/0x9064f18850c6a86cdea854175835f8eabb3a20eb06a2f1598f6fa0675cc950b5/5`, a second real burn that was still unminted on November 20. Under **Finish the transfer**, enter `0x395809d8da4a70145d5060448070a15367df722c` and select **Review recovery**. Rebound simulates `receiveMessage` on Arc and shows the unsigned transaction and gas budget in USDC. If someone has finished it since, the inspector shows **Completed**; once Arc passes block 73,321,951 its attestation expires and the inspector shows **Attestation expired** instead.
+4. **See the duplicate refusal.** Run `uv run python -m rebound.cli prepare 0x7e4334109c120f9da71e01116190804a9d91f2fd5ec07cfd7196a649e68e3f23 4 --caller 0x395809d8da4a70145d5060448070a15367df722c`. It exits with "Transfer is completed. Arc has already consumed this message's nonce. Do not send or mint again."
 5. **Explore every state.** Open `http://127.0.0.1:8765/demo` for clearly labelled synthetic examples of Waiting for Circle, Caller required and the other states.
 
 ## Run locally
@@ -185,7 +185,7 @@ These are existing Circle contracts; Rebound has not deployed a new protocol. Se
 - **Settlement.** Arc’s consumed nonce prevents another mint of the same message. Competing submissions can spend gas even when only one mint succeeds. Rebound checks the nonce again immediately before preparing a signed recovery.
 - **Dependencies.** The flow depends on a canonical confirmed source receipt, Circle’s valid attestation, current Arc chain state and a funded authorized caller. The app bounds discovery to the displayed coverage and checks the original destination caller before simulation.
 
-**UBC track fit.** DeFi and Onchain Applications with Best Use of Arc is the planned entry. The organizer’s guide includes CCTP cross-chain flows in DeFi and allows existing Arc contracts. QuickNode Streams requires a configured live source and destination. [Official hackathon guide](https://docs.google.com/document/d/1QaySCo7u3VxMVNdk3C5Ab3ewc2E46AuLntti-Uzx5EY/edit)
+**UBC track fit.** Rebound is entered in DeFi and Onchain Applications and for Best Use of Arc. The organizer’s guide includes CCTP cross-chain flows in DeFi and allows existing Arc contracts. QuickNode Streams requires a configured live source and destination. [Official hackathon guide](https://docs.google.com/document/d/1QaySCo7u3VxMVNdk3C5Ab3ewc2E46AuLntti-Uzx5EY/edit)
 
 ## How Rebound uses Arc
 
@@ -238,7 +238,7 @@ flowchart LR
 | Source | Base Sepolia, Block with Receipts |
 | Start / batches | Block 61,159,868, no end, batches of 1 |
 | Filter / destination | Author reports `streams/filter.js` and `POST /api/streams` with token authentication |
-| State recorded on 2026-11-20 | **Terminated**; last reported block 61,175,720; 15,861 blocks processed, 0 blocks sent, 8 errors |
+| State recorded on 2026-11-20 | **Terminated**; last reported block 61,175,720; 15,861 blocks processed (dashboard count), 0 blocks sent, 8 errors |
 
 The last reported block precedes the controlled burn at 61,175,721. This snapshot does not establish the cause of termination or that zero sends means zero matching burns. It supplies no successful provider delivery record for the controlled burn. Current state and end-to-end provider delivery remain unverified.
 
@@ -271,7 +271,7 @@ See the [QuickNode setup guide](docs/QUICKNODE.md) for configuration and verific
 ## Checks
 
 ```bash
-uv run pytest
+uv run --locked pytest -q   # 544 tests
 uv run ruff check .
 ```
 
@@ -279,7 +279,7 @@ Use `uv run python scripts/watch_prs.py --interval 900 --hours 6` to record pull
 
 Use `uv run python scripts/check_preview.py "$PREVIEW_URL"` to check an HTTPS deployment’s liveness, provider readiness, demo entry, verified transfer timeline and historical replay.
 
-Protocol tests exercise message fields, recipient/caller/amount matching, malformed input, nonce completion and expiry. Service tests use HTTP-level fixtures around the real discovery/reconciliation code. CLI tests use a fixed throwaway key and isolated RPC doubles: they verify caller and chain guards, fee caps, confirmation, fresh revalidation, signed sender, exactly one broadcast attempt and receipt evidence. These automated tests do not prove that a real testnet recovery has been executed.
+Protocol tests exercise message fields, recipient/caller/amount matching, malformed input, nonce completion and expiry. Service tests use HTTP-level fixtures around the real discovery/reconciliation code. CLI tests use a fixed throwaway key and isolated RPC doubles: they verify caller and chain guards, fee caps, confirmation, fresh revalidation, signed sender, exactly one broadcast attempt and receipt evidence. Automated tests alone do not prove a real recovery; the [November 20 live run](docs/LIVE-RECOVERY.md) does.
 
 ## Coverage and remaining work
 
@@ -287,7 +287,7 @@ Protocol tests exercise message fields, recipient/caller/amount matching, malfor
 - Discovery covers canonical native USDC `DepositForBurn` events from the supported TokenMessengerV2 to Arc. Rebound checks Circle-forwarded mints in read-only mode. For forwarding with an app hook, the verified receipt establishes the CCTP mint and the original app handles downstream actions. Manual recovery is available for eligible hook-free burns. [Circle forwarding formats](https://developers.circle.com/cctp/concepts/forwarding-service#hook-format)
 - Source and destination RPCs, Circle indexing and gas availability remain external dependencies.
 - No seed recovery, arbitrary crypto recovery, loss insurance, mainnet support or recipient redirection.
-- Browser wallet signing, durable hosting and an observed live QuickNode delivery remain open. A temporary HTTPS preview is available for testing. The demo wallet is a synthetic fixture.
+- Browser wallet signing, durable hosting and an observed live QuickNode delivery remain open. The demo wallet is a synthetic fixture.
 - Originality, recurring use, user demand and willingness to pay remain hypotheses rather than validated metrics.
 
 ## Final release gates
