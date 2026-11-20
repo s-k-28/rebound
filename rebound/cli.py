@@ -208,6 +208,8 @@ def parser() -> argparse.ArgumentParser:
     scan.add_argument("--end-block", type=int, help="Use a fixed Base Sepolia block as the end of the scan")
     index = commands.add_parser("stream-index", help="Find and verify transfers from received Stream events")
     index.add_argument("wallet")
+    lookup = commands.add_parser("inspect", help="Find supported burns within one Base Sepolia receipt")
+    lookup.add_argument("tx_hash", help="Original Base Sepolia transaction hash")
     for name in ["prepare", "recover"]:
         command = commands.add_parser(
             name,
@@ -240,6 +242,8 @@ async def run(args: argparse.Namespace) -> dict:
             return await service.scan(args.wallet, blocks=args.blocks, end_block=args.end_block)
         if args.command == "stream-index":
             return await service.scan_stream(args.wallet)
+        if args.command == "inspect":
+            return await service.inspect_transaction(args.tx_hash)
         if args.command == "prepare":
             return await service.prepare(args.tx_hash, args.log_index, args.caller)
         if not sys.stdin.isatty():

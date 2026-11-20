@@ -37,6 +37,7 @@ The same service is available locally:
 uv run python -m rebound.cli --help
 uv run python -m rebound.cli scan "$WALLET_ADDRESS" --blocks 2000
 uv run python -m rebound.cli scan "$WALLET_ADDRESS" --blocks 200 --end-block 61125511
+uv run python -m rebound.cli inspect "$BURN_TX_HASH"
 uv run python -m rebound.cli prepare "$BURN_TX_HASH" "$LOG_INDEX" --caller "$CALLER_ADDRESS"
 ```
 

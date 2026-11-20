@@ -7,7 +7,7 @@ from typing import Any
 import flet as ft
 
 from rebound.examples import example_transfers
-from rebound.protocol import ZERO, address
+from rebound.protocol import ZERO, address, hash32
 
 INK = "#172823"
 MUTED = "#718078"
@@ -70,12 +70,12 @@ class InboxState:
     selected: dict | None = None
     prepared: dict | None = None
     query: str = ""
-    stream: bool = False
+    mode: str = "wallet"
 
     def load_examples(self) -> None:
         self.transfers = example_transfers()
         self.example = True
-        self.stream = False
+        self.mode = "wallet"
         self.scanned = True
         self.filter = "all"
         self.query = ""
@@ -102,11 +102,11 @@ class InboxState:
                 "ready": sum(item["status"] == "ready" for item in self.transfers),
                 "completed": sum(item["status"] == "completed" for item in self.transfers)}
 
-    async def scan(self, service: Any, wallet: str, blocks: int, end_block: str = "", *, stream: bool = False) -> None:
+    async def scan(self, service: Any, search: str, blocks: int, end_block: str = "", *, mode: str = "wallet") -> None:
         self.busy = True
         self.example = False
         self.scanned = False
-        self.stream = stream
+        self.mode = mode
         self.error = ""
         self.coverage = ""
         self.partial = False
@@ -116,10 +116,13 @@ class InboxState:
         self.filter = "all"
         self.query = ""
         try:
-            self.wallet = address(wallet.strip())
-            if stream:
+            if mode == "transaction":
+                result = await service.inspect_transaction(hash32(search.strip()))
+            elif mode == "stream":
+                self.wallet = address(search.strip())
                 result = await service.scan_stream(self.wallet)
             else:
+                self.wallet = address(search.strip())
                 anchor = end_block.strip()
                 if anchor and (not anchor.isascii() or not anchor.isdecimal() or len(anchor) > 16):
                     raise ValueError("Enter a Base Sepolia end block using digits only.")
@@ -155,6 +158,13 @@ class InboxUI:
             focused_border_color=BLUE, border_radius=12, content_padding=18,
             autocorrect=False, on_submit=self.scan,
         )
+        self.tx_input = ft.TextField(
+            label="Base Sepolia transaction hash", hint_text="0x…", text_size=13, height=51,
+            prefix_icon=ft.Icons.RECEIPT_LONG_OUTLINED, filled=True, fill_color="#FFFFFF",
+            border_color=LINE, focused_border_color=BLUE, border_radius=9, content_padding=14,
+            autocorrect=False, on_submit=self.inspect_transaction,
+        )
+        self.show_transaction = False
         self.history = ft.Dropdown(
             value="2000", label="Scan length", width=230, text_size=13,
             options=[ft.DropdownOption("2000", "2,000 source blocks"),
@@ -241,6 +251,7 @@ class InboxUI:
 
     def render(self) -> None:
         self.wallet_input.disabled = self.state.busy
+        self.tx_input.disabled = self.state.busy
         self.history.disabled = self.state.busy
         self.end_block.disabled = self.state.busy
         self.caller_input.disabled = self.preparing
@@ -352,29 +363,38 @@ class InboxUI:
         self.history.content_padding = 13
         button = self.button("Scanning…" if self.state.busy else "Find transfers", self.scan,
                              primary=True, disabled=self.state.busy, icon=ft.Icons.SEARCH_ROUNDED)
-        if self.narrow or (self.page.width or 1200) < 1100:
+        if self.show_transaction:
+            button = self.button("Checking…" if self.state.busy else "Check transaction", self.inspect_transaction,
+                                 primary=True, disabled=self.state.busy, icon=ft.Icons.SEARCH_ROUNDED)
+            if self.narrow:
+                self.tx_input.expand = False
+                form = ft.Column([self.tx_input, button], spacing=13,
+                                 horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
+            else:
+                self.tx_input.expand = True
+                form = ft.Row([self.tx_input, button], spacing=12)
+        elif self.narrow or (self.page.width or 1200) < 1100:
             form = ft.Column([self.wallet_input, ft.Row([self.history, button], wrap=True, spacing=12)],
                              spacing=13, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
             self.wallet_input.expand = False
         else:
             self.wallet_input.expand = True
             form = ft.Row([self.wallet_input, self.history, button], spacing=12)
+        title = "Find transfers in a transaction" if self.show_transaction else "Find transfers by address"
+        note = "Use the original Base Sepolia transaction hash." if self.show_transaction else "A public address is all you need. Your keys stay with you."
         controls = [ft.Row([ft.Icon(ft.Icons.ACCOUNT_BALANCE_WALLET_OUTLINED, color=BLUE, size=18),
-                            self.text("Find transfers by address", 13, INK, ft.FontWeight.W_700),
+                            self.text(title, 13, INK, ft.FontWeight.W_700),
                             ft.Container(expand=True), self.text("Read-only discovery", 10, MUTED, visible=not self.narrow)], spacing=8),
                     form, ft.Row([ft.Icon(ft.Icons.LOCK_OUTLINE_ROUNDED, color=MUTED, size=13),
-                                  self.text("A public address is all you need. Your keys stay with you.", 11, MUTED)], spacing=6)]
-        history_label = "Hide history options" if self.show_history else "History options"
-        if not self.show_history and self.end_block.value.strip():
-            history_label = f"History options · end block {self.end_block.value.strip()[:16]}"
-        controls.append(ft.TextButton(history_label,
-            icon=ft.Icons.HISTORY_ROUNDED, on_click=self.toggle_history, disabled=self.state.busy))
-        if getattr(getattr(self.service, "settings", None), "stream_secret", ""):
-            controls.append(ft.TextButton("Search Stream index", icon=ft.Icons.DYNAMIC_FEED_OUTLINED,
-                on_click=self.scan_index, disabled=self.state.busy))
-        if self.show_history:
-            controls.append(ft.Row([self.end_block, self.text("Use a Base Sepolia block number to revisit an older window.", 11, MUTED)],
-                wrap=True, spacing=12))
+                                  self.text(note, 11, MUTED)], spacing=6)]
+        options = [ft.TextButton("Search by wallet" if self.show_transaction else "Search by transaction",
+                   icon=ft.Icons.SWAP_HORIZ_ROUNDED, on_click=self.toggle_transaction, disabled=self.state.busy)]
+        if not self.show_transaction:
+            options.extend(self.history_options())
+            if self.show_history:
+                controls.append(ft.Row([self.end_block, self.text("Use a Base Sepolia block number to revisit an older window.", 11, MUTED)],
+                    wrap=True, spacing=12))
+        controls.append(ft.Row(options, wrap=True, spacing=8))
         if self.state.busy:
             controls.extend([ft.ProgressBar(color=BLUE, bgcolor="#E8F0E9", bar_height=3),
                              self.text("Reading source events, Circle attestations and destination state…", 11, MUTED)])
@@ -383,6 +403,17 @@ class InboxUI:
                 self.text(self.state.error, 12, "#AE3434", expand=True)]), padding=12, bgcolor="#FFF0EF", border_radius=8))
         return ft.Container(ft.Column(controls, spacing=14), bgcolor="#FFFFFF", padding=20,
                             border_radius=12, border=ft.Border.all(1, LINE))
+
+    def history_options(self):
+        history_label = "Hide history options" if self.show_history else "History options"
+        if not self.show_history and self.end_block.value.strip():
+            history_label = f"History options · end block {self.end_block.value.strip()[:16]}"
+        options = [ft.TextButton(history_label,
+            icon=ft.Icons.HISTORY_ROUNDED, on_click=self.toggle_history, disabled=self.state.busy)]
+        if getattr(getattr(self.service, "settings", None), "stream_secret", ""):
+            options.append(ft.TextButton("Search Stream index", icon=ft.Icons.DYNAMIC_FEED_OUTLINED,
+                on_click=self.scan_index, disabled=self.state.busy))
+        return options
 
     def metrics(self):
         counts = self.state.counts()
@@ -428,10 +459,14 @@ class InboxUI:
             children.extend(self.transfer_row(item) for item in visible)
         else:
             empty_title = "No matching transfers" if self.state.scanned else "A fresh start for unfinished transfers."
-            empty_body = "Enter a public wallet address above. We'll reconstruct supported transfers and check what still needs to happen."
+            empty_body = ("Enter the original Base Sepolia transaction hash above." if self.show_transaction
+                          else "Enter a public wallet address above. We'll reconstruct supported transfers and check what still needs to happen.")
             if self.state.scanned:
-                empty_body = ("Try a different filter or scan source history directly." if self.state.stream
-                              else "Try a different filter or a wider history range. Results cover only the supported route and scanned blocks.")
+                empty_body = {
+                    "stream": "Try a different filter or scan source history directly.",
+                    "transaction": "Check the selected filter and use the original Base Sepolia burn transaction hash.",
+                    "wallet": "Try a different filter or a wider history range. Results cover only the supported route and scanned blocks.",
+                }[self.state.mode]
             children.append(ft.Container(ft.Column([
                 ft.Container(ft.Icon(ft.Icons.ALT_ROUTE_ROUNDED, color=BLUE, size=32), width=76, height=76,
                              bgcolor="#EAF1E9", border_radius=24, alignment=ft.Alignment.CENTER),
@@ -509,7 +544,8 @@ class InboxUI:
                   self.value_line("Recipient receives", display_amount(item.get("net_amount")) + " USDC" if item.get("net_amount") else "Waiting for attestation"),
                   self.value_line("Protocol fee", display_amount(item["fee"]) + " USDC" if item.get("fee") is not None else "Not available yet")]
         if item.get("discovery_source"):
-            discovery = "Stream delivery" if item["discovery_source"] == "stream" else "Source RPC history"
+            discovery = {"stream": "Stream delivery", "rpc": "Source RPC history",
+                         "receipt": "Base Sepolia receipt"}[item["discovery_source"]]
             values.append(self.value_line("Discovered via", discovery))
         controls = [header, ft.Container(ft.Column([
             self.text(item.get("explanation") or description, 12, MUTED), path,
@@ -625,20 +661,34 @@ class InboxUI:
         content = ft.Column([note, link], spacing=8) if self.narrow else ft.Row([note, link], spacing=16)
         return ft.Container(content, padding=ft.Padding.only(bottom=20))
 
-    async def scan(self, _=None, *, stream: bool = False) -> None:
+    async def scan(self, _=None, *, mode: str = "wallet") -> None:
         if self.state.busy:
             return
         self.state.busy = True
         self.render()
-        await self.state.scan(self.service, self.wallet_input.value or self.state.wallet,
-                              int(self.history.value or "2000"), self.end_block.value or "", stream=stream)
+        search = self.tx_input.value if mode == "transaction" else self.wallet_input.value or self.state.wallet
+        await self.state.scan(self.service, search or "", int(self.history.value or "2000"), self.end_block.value or "", mode=mode)
         self.render()
 
     async def scan_index(self, _=None) -> None:
-        await self.scan(stream=True)
+        await self.scan(mode="stream")
+
+    async def inspect_transaction(self, _=None) -> None:
+        await self.scan(mode="transaction")
 
     async def refresh_scan(self, _=None) -> None:
-        await self.scan(stream=self.state.stream)
+        if self.state.busy or self.state.selected is None:
+            return
+        self.show_transaction = self.state.mode == "transaction"
+        if self.show_transaction:
+            self.tx_input.value = self.state.selected["tx_hash"]
+        else:
+            self.wallet_input.value = self.state.wallet
+        await self.scan(mode=self.state.mode)
+
+    def toggle_transaction(self, _=None) -> None:
+        self.show_transaction = not self.show_transaction
+        self.render()
 
     def toggle_history(self, _=None):
         self.show_history = not self.show_history

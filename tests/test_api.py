@@ -40,6 +40,26 @@ async def test_prepare_failure_is_client_actionable_without_provider_secret(setu
         assert "completed" in result.json()["detail"]
 
 
+async def test_transaction_lookup_reuses_canonical_receipt_without_a_history_scan(setup_service):
+    from rebound.app import create_app
+
+    service, state = setup_service
+    state["rpc_error"] = True
+    app = create_app(service, include_ui=False)
+    url = "/api/transactions/0x" + "cd" * 32
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        result = await client.get(url)
+        assert result.status_code == 200
+        rows = result.json()["transfers"]
+        assert [(row["log_index"], row["discovery_source"], row["status"]) for row in rows] == [(3, "receipt", "ready")]
+        state["logs"] = []
+        assert (await client.get(url)).json()["transfers"] == []
+        state["canonical"] = False
+        result = await client.get(url)
+        assert result.status_code == 400
+        assert "canonical block" in result.json()["detail"]
+
+
 async def test_authenticated_stream_envelopes_are_candidates_only(setup_service):
     from dataclasses import replace
 

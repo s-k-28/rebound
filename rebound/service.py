@@ -190,13 +190,32 @@ class RecoveryService:
 
         return await _gather_reads(*(inspect(candidate) for candidate in burns[:100]))
 
-    async def _receipt_burn(self, tx_hash: str, log_index: int, expected: p.Burn | None = None) -> p.Burn:
-        receipt = await self.base.call("eth_getTransactionReceipt", [p.hash32(tx_hash)])
-        if not isinstance(receipt, dict) or receipt.get("status") != "0x1":
-            raise SourceChanged("Source burn receipt is missing or unsuccessful.")
-        if receipt.get("transactionHash", "").lower() != tx_hash.lower():
-            raise SourceChanged("Source receipt does not identify the expected transaction.")
+    async def inspect_transaction(self, tx_hash: str) -> dict:
+        tx_hash = p.hash32(tx_hash)
+        async with self._scan_slots:
+            await self._verify_chain(self.base, 84532, p.MESSENGER)
+            receipt_burns = await self._receipt_burns(tx_hash)
+            burns = [burn for burn in receipt_burns if burn.destination_domain == 26]
+            latest = quantity(await self.base.call("eth_blockNumber")) if burns else None
+
+            async def inspect(burn: p.Burn) -> dict:
+                async with self._read_slots:
+                    row = await self.diagnose(burn, source_head=latest, receipt_burns=receipt_burns)
+                    row["discovery_source"] = "receipt"
+                    return row
+
+            transfers = await _gather_reads(*(inspect(burn) for burn in burns[:100]))
+            return {"tx_hash": tx_hash, "coverage": "One Base Sepolia receipt. Covers native USDC CCTP V2 burns to Arc.",
+                    "partial": len(burns) > 100, "transfers": transfers}
+
+    async def _receipt_burns(self, tx_hash: str) -> list[p.Burn]:
+        tx_hash = p.hash32(tx_hash)
+        receipt = await self.base.call("eth_getTransactionReceipt", [tx_hash])
         try:
+            if not isinstance(receipt, dict) or receipt.get("status") != "0x1":
+                raise SourceChanged("Source burn receipt is missing or unsuccessful.")
+            if p.hash32(receipt["transactionHash"]) != tx_hash:
+                raise SourceChanged("Source receipt does not identify the expected transaction.")
             block_number = quantity(receipt["blockNumber"])
             block_hash = p.hash32(receipt["blockHash"])
             block = await self.base.call("eth_getBlockByNumber", [hex(block_number), False])
@@ -205,39 +224,39 @@ class RecoveryService:
             logs = receipt["logs"]
             if not isinstance(logs, list):
                 raise ValueError("Invalid receipt logs.")
-            matches, all_burns = [], []
+            burns = []
             for log in logs:
                 if not isinstance(log, dict):
                     continue
                 try:
                     candidate = p.decode_burn(log)
-                    all_burns.append(candidate)
-                    if quantity(log.get("logIndex")) == log_index:
-                        matches.append(candidate)
                 except ValueError:
                     continue
-            if len(matches) != 1:
-                raise SourceChanged("No unique supported burn remains at this event position.")
-            burn = matches[0]
-            if burn.tx_hash != tx_hash.lower() or burn.block_number != block_number or burn.block_hash != block_hash:
-                raise SourceChanged("Burn event identity does not match its receipt.")
-            if expected is not None and burn != expected:
-                raise SourceChanged("The indexed burn differs from the current source receipt.")
-            # Circle assigns the V2 nonce offchain. Equal-value burns in the same
-            # transaction cannot be associated by economic fields alone. Until an
-            # explicit MessageSent association is supported, neither may borrow a
-            # different event's attestation/nonce (including a completed nonce).
-            fields = ("amount", "depositor", "mint_recipient", "destination_domain", "caller", "max_fee", "min_finality", "hook")
-            same_economics = [candidate for candidate in all_burns if all(
-                getattr(candidate, field) == getattr(burn, field) for field in fields
-            )]
-            if len(same_economics) != 1:
-                raise AmbiguousBurn("Source transaction contains ambiguous identical burns; exact message association is not supported yet.")
-            return burn
+                if candidate.tx_hash != tx_hash or candidate.block_number != block_number or candidate.block_hash != block_hash:
+                    raise SourceChanged("Burn event identity does not match its receipt.")
+                burns.append(candidate)
+            return burns
         except (KeyError, TypeError, AttributeError, ValueError) as exc:
-            if isinstance(exc, (SourceChanged, AmbiguousBurn)):
+            if isinstance(exc, SourceChanged):
                 raise
             raise SourceChanged("The source receipt could not be matched safely.") from exc
+
+    async def _receipt_burn(self, tx_hash: str, log_index: int, expected: p.Burn | None = None) -> p.Burn:
+        return self._match_receipt_burn(await self._receipt_burns(tx_hash), log_index, expected)
+
+    def _match_receipt_burn(self, burns: list[p.Burn], log_index: int, expected: p.Burn | None = None) -> p.Burn:
+        matches = [burn for burn in burns if burn.log_index == log_index]
+        if len(matches) != 1:
+            raise SourceChanged("No unique supported burn remains at this event position.")
+        burn = matches[0]
+        if expected is not None and burn != expected:
+            raise SourceChanged("The indexed burn differs from the current source receipt.")
+        # Circle assigns the nonce offchain. Identical burns in one receipt cannot be
+        # associated by economic fields alone and must not share an attestation.
+        fields = ("amount", "depositor", "mint_recipient", "destination_domain", "caller", "max_fee", "min_finality", "hook")
+        if sum(all(getattr(candidate, field) == getattr(burn, field) for field in fields) for candidate in burns) != 1:
+            raise AmbiguousBurn("Source transaction contains ambiguous identical burns; exact message association is not supported yet.")
+        return burn
 
     async def _matched_attestation(self, burn: p.Burn) -> tuple[p.Message, str, str, str | None] | None:
         response = await self.circle.messages(burn.tx_hash)
@@ -292,7 +311,8 @@ class RecoveryService:
             raise UpstreamError("Arc returned an unrecognized nonce state.")
         return p.classify(message, nonce_used=bool(used), destination_block=quantity(head), caller=caller)
 
-    async def diagnose(self, burn: p.Burn, *, source_head: int | None = None, caller: str | None = None) -> dict:
+    async def diagnose(self, burn: p.Burn, *, source_head: int | None = None, caller: str | None = None,
+                       receipt_burns: list[p.Burn] | None = None) -> dict:
         row = {
             "key": burn.key, "tx_hash": burn.tx_hash, "log_index": burn.log_index,
             "block_number": burn.block_number, "amount": p.usdc(burn.amount),
@@ -302,7 +322,10 @@ class RecoveryService:
             "destination_url": None,
         }
         try:
-            await self._receipt_burn(burn.tx_hash, burn.log_index, burn)
+            if receipt_burns is None:
+                await self._receipt_burn(burn.tx_hash, burn.log_index, burn)
+            else:
+                self._match_receipt_burn(receipt_burns, burn.log_index, burn)
             if burn.destination_domain != 26:
                 raise ValueError("Unsupported destination route.")
             attested = await self._matched_attestation(burn)
