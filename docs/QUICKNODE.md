@@ -33,3 +33,9 @@ Use **Search Stream index** in the inbox or `python -m rebound.cli stream-index 
 An HTTP request with a fixture proves the adapter works; it does not prove a QuickNode Stream exists. Streams are billed for blocks processed even if a filter returns no matching logs.
 
 Official references: [filters](https://www.quicknode.com/docs/streams/filters), [EVM dataset schemas](https://www.quicknode.com/docs/streams/data-sources/ethereum-evm), [create Stream](https://www.quicknode.com/docs/streams/rest-api/create-stream), [backfill and reorgs](https://www.quicknode.com/docs/streams/backfilling).
+
+## Webhook setup test
+
+QuickNode's **Check Connection** returned `401 Invalid or stale Stream signature`.
+The separate **Send Payload** test reported **Stream test successful**.
+Live Base Sepolia burn delivery still needs to be verified with **Search Stream index**.
