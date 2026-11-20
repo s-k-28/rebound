@@ -91,3 +91,41 @@ async def test_authenticated_stream_envelopes_are_candidates_only(setup_service)
         state["canonical"] = False
         index = await client.get("/api/stream-index", params=params)
         assert index.json()["transfers"][0]["status"] == "source_changed"
+
+
+async def test_quicknode_signature_verifies_the_decoded_payload_and_blocks_fallback(setup_service):
+    import gzip
+    import hmac
+    import json
+    import time
+    from dataclasses import replace
+
+    from rebound.app import create_app
+    from tests.test_protocol import burn_log
+
+    service, _ = setup_service
+    token = "quicknode-test-token"
+    service.settings = replace(service.settings, stream_security_token=token, stream_secret="legacy-test-secret")
+    app = create_app(service, include_ui=False)
+    body = json.dumps({"data": [{"logs": [burn_log()]}]}, indent=2).encode()
+    nonce = "delivery-test-nonce"
+
+    def signed(timestamp: int) -> dict:
+        signature = hmac.digest(token.encode(), f"{nonce}{timestamp}".encode() + body, "sha256").hex()
+        return {"x-qn-nonce": nonce, "x-qn-timestamp": str(timestamp), "x-qn-signature": signature}
+
+    headers = signed(int(time.time()))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        url = "/api/streams"
+        assert (await client.post(url, content=body, headers={"x-rebound-secret": "legacy-test-secret"})).status_code == 401
+        assert (await client.post(url, content=body + b" ", headers=headers)).status_code == 401
+        assert (await client.post(url, content=body, headers=signed(int(time.time()) - 1000))).status_code == 401
+        assert (await client.get("/api/stream-index", params={"wallet": WALLET})).json()["transfers"] == []
+
+        assert (await client.post(url, content=body, headers=headers)).json()["accepted"] == 1
+        compressed = headers | {"Content-Encoding": "gzip"}
+        assert (await client.post(url, content=gzip.compress(body), headers=compressed)).json()["accepted"] == 1
+        assert (await client.post(url, content=b"bad gzip", headers=compressed)).status_code == 400
+        assert (await client.post(url, content=gzip.compress(b"x" * 2_000_001), headers=compressed)).status_code == 413
+        index = await client.get("/api/stream-index", params={"wallet": WALLET})
+        assert [row["discovery_source"] for row in index.json()["transfers"]] == ["stream"]

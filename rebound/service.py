@@ -19,6 +19,7 @@ class Settings:
     circle_url: str = "https://iris-api-sandbox.circle.com"
     database: str = "data/rebound.sqlite3"
     stream_secret: str = ""
+    stream_security_token: str = ""
 
     def __post_init__(self):
         for endpoint in (self.base_rpc, self.arc_rpc, self.circle_url):
@@ -34,7 +35,12 @@ class Settings:
             circle_url=os.getenv("CIRCLE_SANDBOX_URL", cls.circle_url),
             database=os.getenv("REBOUND_DB", cls.database),
             stream_secret=os.getenv("REBOUND_STREAM_SECRET", ""),
+            stream_security_token=os.getenv("REBOUND_STREAM_SECURITY_TOKEN", ""),
         )
+
+    @property
+    def stream_enabled(self) -> bool:
+        return bool(self.stream_security_token or self.stream_secret)
 
 
 class SourceChanged(ValueError):
@@ -168,7 +174,7 @@ class RecoveryService:
 
     async def scan_stream(self, wallet: str) -> dict:
         wallet = p.address(wallet)
-        if not self.settings.stream_secret:
+        if not self.settings.stream_enabled:
             raise ValueError("The Stream index is not enabled on this server.")
         async with self._scan_slots:
             burns = self.store.candidates(wallet, stream_only=True)

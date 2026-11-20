@@ -1,6 +1,12 @@
 """ASGI entry point: Python Flet interface and read-only recovery APIs."""
 import asyncio
+import gzip
+import hmac
+import io
+import json
 import secrets
+import time
+import zlib
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
@@ -14,12 +20,28 @@ from rebound.service import RecoveryService, Settings, UpstreamError
 
 WALLET_PATTERN = r"^0x[0-9a-fA-F]{40}$"
 HASH_PATTERN = r"^0x[0-9a-fA-F]{64}$"
+STREAM_BODY_LIMIT = 2_000_000
+STREAM_SIGNATURE_WINDOW_SECONDS = 900
 
 
 class PrepareRequest(BaseModel):
     tx_hash: str = Field(pattern=HASH_PATTERN)
     log_index: int = Field(ge=0, le=100000)
     caller: str = Field(pattern=WALLET_PATTERN)
+
+
+def verify_stream_signature(request: Request, body: bytes, token: str) -> None:
+    nonce = request.headers.get("x-qn-nonce", "")
+    timestamp = request.headers.get("x-qn-timestamp", "")
+    signature = request.headers.get("x-qn-signature", "")
+    if not (0 < len(nonce) <= 128 and nonce.isascii() and timestamp.isascii()
+            and timestamp.isdecimal() and len(timestamp) <= 12
+            and abs(time.time() - int(timestamp)) <= STREAM_SIGNATURE_WINDOW_SECONDS
+            and signature.isascii() and len(signature) == 64):
+        raise HTTPException(401, "Invalid or stale Stream signature.")
+    expected = hmac.digest(token.encode(), (nonce + timestamp).encode() + body, "sha256").hex()
+    if not hmac.compare_digest(expected, signature.lower()):
+        raise HTTPException(401, "Invalid or stale Stream signature.")
 
 
 def create_app(recovery: RecoveryService | None = None, *, include_ui: bool = True) -> FastAPI:
@@ -44,7 +66,7 @@ def create_app(recovery: RecoveryService | None = None, *, include_ui: bool = Tr
     async def health():
         return {"status": "ok", "network": "testnet", "route": "Base Sepolia → Arc Testnet",
                 "signing": "local CLI only", "upstreams": "not checked by this endpoint",
-                "stream_enabled": bool(recovery.settings.stream_secret)}
+                "stream_enabled": recovery.settings.stream_enabled}
 
     async def checked(awaitable):
         try:
@@ -77,17 +99,32 @@ def create_app(recovery: RecoveryService | None = None, *, include_ui: bool = Tr
 
     @api.post("/api/streams")
     async def stream(request: Request, x_rebound_secret: Annotated[str | None, Header()] = None):
-        expected = recovery.settings.stream_secret
-        if not expected:
+        settings = recovery.settings
+        token = settings.stream_security_token
+        if not settings.stream_enabled:
             raise HTTPException(503, "Stream ingestion is not configured.")
-        if not x_rebound_secret or not secrets.compare_digest(x_rebound_secret, expected):
+        if not token and not secrets.compare_digest((x_rebound_secret or "").encode(), settings.stream_secret.encode()):
             raise HTTPException(401, "Invalid Stream authentication.")
-        body = bytearray()
+        wire_body = bytearray()
         async for chunk in request.stream():
-            body.extend(chunk)
-            if len(body) > 2_000_000:
+            if len(wire_body) + len(chunk) > STREAM_BODY_LIMIT:
                 raise HTTPException(413, "Stream payload exceeds 2 MB.")
-        import json
+            wire_body.extend(chunk)
+        encoding = request.headers.get("content-encoding", "identity").lower()
+        if encoding == "gzip":
+            try:
+                with gzip.GzipFile(fileobj=io.BytesIO(wire_body)) as archive:
+                    body = archive.read(STREAM_BODY_LIMIT + 1)
+            except (OSError, EOFError, ValueError, zlib.error) as exc:
+                raise HTTPException(400, "Invalid compressed Stream payload.") from exc
+            if len(body) > STREAM_BODY_LIMIT:
+                raise HTTPException(413, "Stream payload exceeds 2 MB after decompression.")
+        elif encoding == "identity":
+            body = bytes(wire_body)
+        else:
+            raise HTTPException(415, "Stream payload encoding is unsupported.")
+        if token:
+            verify_stream_signature(request, body, token)
         try:
             payload = json.loads(body)
             if isinstance(payload, dict) and "logs" not in payload:
@@ -103,7 +140,7 @@ def create_app(recovery: RecoveryService | None = None, *, include_ui: bool = Tr
                 raise ValueError("Expected an object containing an event logs list.")
             return {"accepted": recovery.ingest_logs(payload["logs"]),
                     "note": "Candidates only; chain verification is required before recovery."}
-        except (ValueError, TypeError) as exc:
+        except (ValueError, TypeError, RecursionError) as exc:
             raise HTTPException(400, "Invalid Stream event payload.") from exc
 
     if include_ui:

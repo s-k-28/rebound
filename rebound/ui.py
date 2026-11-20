@@ -410,7 +410,7 @@ class InboxUI:
             history_label = f"History options · end block {self.end_block.value.strip()[:16]}"
         options = [ft.TextButton(history_label,
             icon=ft.Icons.HISTORY_ROUNDED, on_click=self.toggle_history, disabled=self.state.busy)]
-        if getattr(getattr(self.service, "settings", None), "stream_secret", ""):
+        if getattr(getattr(self.service, "settings", None), "stream_enabled", False):
             options.append(ft.TextButton("Search Stream index", icon=ft.Icons.DYNAMIC_FEED_OUTLINED,
                 on_click=self.scan_index, disabled=self.state.busy))
         return options

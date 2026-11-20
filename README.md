@@ -25,7 +25,7 @@ Default public RPCs can be rate-limited or restrict historical log queries. For 
 uv run --env-file .env uvicorn rebound.app:app --host 127.0.0.1 --port 8765
 ```
 
-Keep `.env`, RPC credentials and signing keys out of Git. `REBOUND_DB` selects a writable SQLite path. `REBOUND_STREAM_SECRET` enables authenticated candidate ingestion; leave it empty to keep ingestion disabled. Production hosting additionally needs HTTPS, durable storage and an abuse/load review.
+Keep `.env`, RPC credentials and signing keys out of Git. `REBOUND_DB` selects a writable SQLite path. Set `REBOUND_STREAM_SECURITY_TOKEN` to validate QuickNode signatures, or use `REBOUND_STREAM_SECRET` for local adapter checks. Ingestion is disabled by default. Production hosting additionally needs HTTPS, durable storage and an abuse/load review.
 
 ## Find and prepare transfers
 
