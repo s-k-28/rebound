@@ -40,7 +40,7 @@ def test_safe_destination_sends_one_validated_log_without_redirects_or_proxy_env
     target, options = calls[-1]
     assert target == url.rstrip("/") + "/api/streams"
     assert "x-rebound-secret" not in calls[0][1].get("headers", {})
-    assert options["headers"]["x-rebound-secret"] == "unit-test-only-secret"
+    assert options["headers"] == {"content-type": "application/json", "x-rebound-secret": "unit-test-only-secret"}
     assert len(json.loads(options["content"])["logs"]) == 1
 
 

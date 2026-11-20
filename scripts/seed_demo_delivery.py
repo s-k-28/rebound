@@ -1,11 +1,10 @@
 """Deliver the documented controlled burn to a running Rebound as a local endpoint test.
 
-Usage: REBOUND_STREAM_SECRET=... uv run python scripts/seed_demo_delivery.py [BASE_URL]
+Usage: uv run --locked python scripts/seed_demo_delivery.py [BASE_URL]
 
-This lets the QuickNode walkthrough show a wallet-only discovery when no live Stream is
-delivering. It posts with the local shared secret, never a QuickNode signature, so the app
-labels the delivery "Shared-secret adapter payload" and states that provider delivery is
-unverified. It is not a QuickNode delivery and must not be described as one.
+This reads a public testnet receipt and submits it using REBOUND_STREAM_SECRET.
+Use a fresh database to show the "Shared-secret adapter payload" label in the walkthrough.
+The provider delivery check remains pending.
 
 Reads the public receipt of the controlled run in docs/LIVE-RECOVERY.md from Base Sepolia.
 Exit 0: delivered; 1: the receipt or the endpoint failed; 2: bad arguments or no secret.
@@ -94,7 +93,7 @@ def main(argv: list[str]) -> int:
     try:
         base = destination_base(argv[1] if len(argv) == 2 else DEFAULT_URL)
     except ValueError:
-        print("Use an HTTPS destination without userinfo, query or fragment; HTTP is allowed only for loopback.")
+        print("Use HTTPS without userinfo, query or fragment. Loopback addresses can also use HTTP.")
         return 2
     rpc = os.getenv("BASE_SEPOLIA_RPC", DEFAULT_RPC)
     try:
@@ -120,7 +119,7 @@ def main(argv: list[str]) -> int:
     except (httpx.HTTPError, httpx.InvalidURL, ValueError, KeyError, TypeError, UpstreamError) as exc:
         print(f"Could not deliver: {type(exc).__name__}.")
         return 1
-    print("Delivered 1 burn as a local endpoint test (not a QuickNode delivery).")
+    print("Delivered one burn as a local endpoint test. Provider delivery remains unverified.")
     return 0
 
 

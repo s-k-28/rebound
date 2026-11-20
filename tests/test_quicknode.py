@@ -508,19 +508,3 @@ def test_the_stream_id_is_findable_in_the_docs_judges_read():
         assert STREAM_ID in (ROOT / doc).read_text(), doc
     assert "Why QuickNode Streams" in (ROOT / "README.md").read_text()
     assert "## Why this Stream" in (ROOT / "docs" / "QUICKNODE.md").read_text()
-
-
-# ------------------------------------------------------- demo seeding script
-
-def test_seed_script_picks_the_right_log_and_refuses_to_guess():
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("seed_demo_delivery", ROOT / "scripts" / "seed_demo_delivery.py")
-    seed = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(seed)
-    receipt = {"logs": [{"logIndex": "0x3", "data": "a"}, {"logIndex": "0x4", "data": "b"}]}
-    assert seed.burn_log_from_receipt(receipt, 4)["data"] == "b"
-    with pytest.raises(ValueError, match="no log with index 9"):
-        seed.burn_log_from_receipt(receipt, 9)
-    assert seed.SOURCE_LOG == 4
-    # The script must send the shared secret, never fabricate a QuickNode signature.
-    assert "x-qn-signature" not in (ROOT / "scripts" / "seed_demo_delivery.py").read_text()
