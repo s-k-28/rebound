@@ -296,8 +296,9 @@ class RecoveryService:
 
         async def header(tag: str, expected: int | None = None) -> tuple[int, int]:
             try:
-                async with self._read_slots:
-                    block = await self.base.call("eth_getBlockByNumber", [tag, False])
+                # One sequential read per admitted scan, like the chain check. Taking a read
+                # slot would queue this deadline behind another scan's bulk log reads.
+                block = await self.base.call("eth_getBlockByNumber", [tag, False])
                 if not isinstance(block, dict):
                     raise ValueError
                 for field in ("number", "timestamp"):
