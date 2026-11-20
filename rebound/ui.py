@@ -406,7 +406,8 @@ class InboxUI:
             back = ft.Container(ft.Row([self.link("All transfers", self.back, icon=ft.Icons.ARROW_BACK, color=INK_2)]),
                                 bgcolor=SURFACE, border=ft.Border(bottom=ft.BorderSide(1, RULE)),
                                 padding=ft.Padding.only(left=10, top=6, bottom=6))
-            content = [ft.Container(control, padding=ft.Padding.symmetric(horizontal=16)) for control in content]
+            content = [ft.Container(control, padding=ft.Padding.only(left=16, right=16, top=12, bottom=12))
+                       for control in content]
             content.extend([back, self.inspector_host])
         else:
             content.extend([self.scan_panel(), self.inbox()])
