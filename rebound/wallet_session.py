@@ -15,7 +15,7 @@ State machine (all transitions are validated here):
 
 Reservations are per transfer and per process: while one session is approving,
 approved, sending, submitted, unknown or unrelated, no other session for that
-transfer can be approved, and reopening the transfer attaches to that same session.
+transfer can be approved. Reopening with its owner's capability resumes that session.
 They are held in memory, so they cover every tab and browser served by this one
 Rebound process, not other processes or a restart.
 
@@ -75,6 +75,7 @@ class WalletSession:
     reviewing: bool = False
     approved_at: float | None = None
     hash: str | None = None
+    hash_from_adapter: bool = False
     receipt: dict | None = None
     error: str = ""
     notice: str = ""
@@ -125,12 +126,18 @@ class WalletSessions:
 
     # Lifecycle -----------------------------------------------------------------
 
-    def open(self, tx_hash: str, log_index: int) -> WalletSession:
-        """Resume the attempt that holds this transfer, or start a new session."""
-        held = self.holder(tx_hash, log_index)
-        if held is not None:
-            self._lapse(held)
-            return held
+    def open(self, tx_hash: str, log_index: int, *, owned_session_id: str | None = None) -> WalletSession:
+        """Resume only a capability already owned by this UI, never a public transfer's holder."""
+        tx_hash = p.hash32(tx_hash)
+        if owned_session_id is not None:
+            try:
+                owned = self.get(owned_session_id)
+            except SessionNotFound:
+                pass
+            else:
+                if owned.tx_hash != tx_hash or owned.log_index != log_index:
+                    raise SessionConflict("This wallet session belongs to a different transfer.")
+                return owned
         return self.create(tx_hash, log_index)
 
     def create(self, tx_hash: str, log_index: int) -> WalletSession:
@@ -173,19 +180,25 @@ class WalletSessions:
         self._lapse(session)
         return session
 
-    def close(self, session_id: str) -> None:
+    def close(self, session_id: str) -> bool:
         """Forget a session the UI closed, unless it holds its transfer's reservation."""
         session = self._sessions.get(session_id)
-        if session is not None and session.state not in HOLDING:
-            del self._sessions[session_id]
+        if session is None:
+            return True
+        if session.state in HOLDING:
+            return False
+        del self._sessions[session_id]
+        return True
 
     def holder(self, tx_hash: str, log_index: int) -> WalletSession | None:
+        self._purge()
         session_id = self._holders.get(f"{p.hash32(tx_hash)}:{log_index}")
         return self._sessions.get(session_id) if session_id else None
 
     def _purge(self) -> None:
         now = self.clock()
         for session_id, session in list(self._sessions.items()):
+            self._lapse(session)
             if session.state not in HOLDING and now - session.created > self.ttl:
                 del self._sessions[session_id]
 
@@ -238,13 +251,19 @@ class WalletSessions:
         session.version += 1
         try:
             review, transaction, raw, nonce = await self._prepare(session, account)
+        except asyncio.CancelledError:
+            if self._sessions.get(session.id) is session and session.generation == generation:
+                session.reviewing = False
+                session.version += 1
+            raise
         except (ValueError, UpstreamError, TimeoutError) as exc:
             if session.generation == generation and session.state in {"connected", "reviewed"}:
                 session.reviewing = False
                 session.review = session.transaction = None
                 self._change(session, "connected", error=_message(exc))
             return session
-        if session.generation == generation and session.state in {"connected", "reviewed"}:
+        if (self._sessions.get(session.id) is session and session.generation == generation
+                and session.state in {"connected", "reviewed"}):
             session.reviewing = False
             session.review, session.transaction, session.raw_message, session.nonce = review, transaction, raw, nonce
             self._change(session, "reviewed")
@@ -282,6 +301,8 @@ class WalletSessions:
 
     def _check_approval(self, session: WalletSession, generation: int, transaction: dict) -> None:
         """The click must name the review on screen: same generation, same exact transaction."""
+        if self._sessions.get(session.id) is not session:
+            raise SessionNotFound("This wallet session has closed. Start again from the transfer.")
         self._require(session, "reviewed")
         if session.reviewing or session.transaction is None or session.review is None:
             raise SessionConflict("Wait for the review to finish.")
@@ -318,16 +339,23 @@ class WalletSessions:
                 self.service.arc.call("eth_blockNumber"))
             if quantity(balance) < integer(stored["gas"]) * integer(stored["maxFeePerGas"]):
                 raise ValueError("The connected account no longer covers the maximum network fee.")
+            head = quantity(head)
+        except asyncio.CancelledError:
+            if self._sessions.get(session.id) is session and session.state == "approving":
+                self._change(session, "reviewed")
+            raise
         except (ValueError, UpstreamError, TimeoutError) as exc:
             if session.state == "approving":
                 self._change(session, "reviewed", error=_message(exc))
             return session
+        if self._sessions.get(session.id) is not session:
+            raise SessionNotFound("This wallet session has closed. Start again from the transfer.")
         if session.state != "approving":
             return session
         if session.transaction != stored:
             self._change(session, "reviewed", error="The review changed. Check it again before sending.")
             return session
-        session.approved_at, session.approved_block = self.clock(), quantity(head)
+        session.approved_at, session.approved_block = self.clock(), head
         self._change(session, "approved")
         return session
 
@@ -348,6 +376,7 @@ class WalletSessions:
                 return session  # Idempotent retry from the adapter.
             self._require(session, "sending")
             session.hash = tx_hash
+            session.hash_from_adapter = True
             self._change(session, "submitted")
         elif outcome == "rejected":
             self._require(session, "sending")
@@ -371,6 +400,7 @@ class WalletSessions:
         session = self.get(session_id)
         self._require(session, "sending", "submitted", "unknown", "unrelated")
         session.hash = p.hash32(tx_hash)
+        session.hash_from_adapter = False
         self._change(session, "submitted")
         return session
 
@@ -473,18 +503,32 @@ class WalletSessions:
         """
         def unrelated(reason):
             return {"status": "unrelated", "reason": reason}
+        if not session.hash_from_adapter:
+            return unrelated("the hash was not reported by this wallet request; the original send may still land.")
         approved = session.transaction or {}
         number = quantity(receipt.get("blockNumber"))
-        block, sent = await asyncio.gather(
+        block_hash = p.hash32(receipt.get("blockHash"))
+        index = quantity(receipt.get("transactionIndex"))
+        chain, block, sent = await asyncio.gather(
+            self.service.arc.call("eth_chainId"),
             self.service.arc.call("eth_getBlockByNumber", [hex(number), False]),
             self.service.arc.call("eth_getTransactionByHash", [tx_hash]))
-        if not isinstance(block, dict) or not receipt.get("blockHash") or block.get("hash") != receipt["blockHash"]:
+        if (quantity(chain) != ARC_CHAIN_ID or not isinstance(block, dict)
+                or p.hash32(block.get("hash")) != block_hash or quantity(block.get("number")) != number):
             return unrelated("its block is not canonical on Arc yet.")
+        transactions = block.get("transactions")
+        if (not isinstance(transactions, list) or index >= len(transactions)
+                or p.hash32(transactions[index]) != tx_hash):
+            return unrelated("the transaction is not included at its canonical block index.")
         if session.approved_block is None or number <= session.approved_block:
             return unrelated("it was mined before this attempt was approved.")
         if (not isinstance(sent, dict) or p.hash32(sent.get("hash")) != tx_hash
                 or p.address(sent.get("from")) != session.account or p.address(sent.get("to")) != p.TRANSMITTER
-                or str(sent.get("input", "")).lower() != approved.get("data")):
+                or str(sent.get("input", "")).lower() != approved.get("data")
+                or quantity(sent.get("value")) != 0
+                or p.hash32(sent.get("blockHash")) != block_hash
+                or quantity(sent.get("blockNumber")) != number
+                or quantity(sent.get("transactionIndex")) != index):
             return unrelated("it does not carry the approved transaction's calldata.")
         return {"status": "reverted"}
 
