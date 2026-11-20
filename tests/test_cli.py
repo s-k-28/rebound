@@ -1,5 +1,6 @@
 """Signing tests use a fixed throwaway fixture key and never reach a network."""
 
+import asyncio
 from copy import deepcopy
 from decimal import Decimal
 
@@ -190,6 +191,22 @@ async def test_valid_recovery_signs_once_and_reports_confirmed_receipt():
     assert len(service.arc.broadcasts) == 1
     assert service.preparations == 2
     assert all(KEY not in line for line in output)
+
+
+async def test_receipt_deadline_preserves_signed_hash_without_resending(monkeypatch):
+    class SlowReceiptArc(FakeArc):
+        async def call(self, method, params=None):
+            if method == "eth_getTransactionReceipt":
+                await asyncio.Future()
+            return await super().call(method, params)
+
+    monkeypatch.setattr(cli, "RECEIPT_TIMEOUT_SECONDS", 0.01)
+    service = FakeService(SlowReceiptArc())
+    result, output = await run_recovery(service)
+    assert result["status"] == "submitted"
+    assert result["tx_hash"] == "0x" + keccak(service.arc.broadcasts[0]).hex()
+    assert len(service.arc.broadcasts) == 1
+    assert any("Check the destination hash" in line for line in output)
 
 
 async def test_uncertain_broadcast_reports_hash_without_resubmitting():

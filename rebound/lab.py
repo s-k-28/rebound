@@ -11,7 +11,6 @@ Call shapes: Circle TokenMessengerV2.sol (src/v2, Apache-2.0).
 
 import argparse
 import asyncio
-import getpass
 import json
 import os
 import re
@@ -40,8 +39,10 @@ from rebound.protocol import (
     hex_bytes,
     usdc,
 )
+from rebound.terminal import read_hidden_key
 
 BASE_CHAIN_ID = 84532
+ARC_TESTNET_ID = 5042002
 SOURCE_DOMAIN = 6
 ARC_DOMAIN = 26
 FINALITY = {"fast": 1000, "standard": 2000}
@@ -52,8 +53,9 @@ MAX_FEE_CAP = 10_000  # 0.01 USDC: refuse any quote that implies a larger maxFee
 FEE_BUFFER = Decimal("1.2")  # Circle's fee guide suggests a 10-20% buffer.
 APPROVE_GAS_BUDGET = 100_000
 BURN_GAS_BUDGET = 300_000
-GAS_COST_CAP = 10**15  # 0.001 Base Sepolia ETH per transaction.
+EXECUTION_COST_CAP = 10**15  # 0.001 ETH per transaction, excluding the separate L1 data fee.
 RECEIPT_POLLS, POLL_SECONDS = 30, 2
+RECEIPT_TIMEOUT_SECONDS = 60
 APPROVE_SELECTOR = keccak(text="approve(address,uint256)")[:4]
 # The plain V2 burn (0x8e0250ee), not depositForBurnWithHook; tests pin the selector.
 DEPOSIT_SELECTOR = keccak(
@@ -88,7 +90,12 @@ class LabRpc(Rpc):
         if isinstance(data.get("error"), dict):
             reason = re.sub(r"[^ -~]", "", str(data["error"].get("message", "")))[:160]
             return False, reason or "execution reverted"
-        return True, str(data.get("result", ""))
+        result = data.get("result")
+        try:
+            hex_bytes(result)
+        except ValueError as exc:
+            raise UpstreamError(f"{self.label} returned an unreadable simulation.") from exc
+        return True, result
 
 
 @dataclass(frozen=True)
@@ -131,12 +138,13 @@ def parse_amount(text: str) -> int:
         value = Decimal(str(text).strip())
     except InvalidOperation:
         raise ValueError("--amount must be a decimal USDC amount, such as 1 or 0.5.") from None
-    if not value.is_finite() or value <= 0 or value != value.quantize(Decimal("0.000001")):
+    if not value.is_finite() or value <= 0:
         raise ValueError("--amount must be positive with at most 6 decimal places.")
-    units = int(value * 10**6)
-    if units > MAX_AMOUNT:
+    if value > Decimal(MAX_AMOUNT).scaleb(-6):
         raise ValueError(f"The lab caps a controlled burn at {usdc(MAX_AMOUNT)} USDC.")
-    return units
+    if value != value.quantize(Decimal("0.000001")):
+        raise ValueError("--amount must be positive with at most 6 decimal places.")
+    return int(value * 10**6)
 
 
 def parse_recipient(value: str) -> str:
@@ -144,6 +152,13 @@ def parse_recipient(value: str) -> str:
     if recipient in (ZERO, MESSENGER, TRANSMITTER, USDC):
         raise ValueError("Use an Arc Testnet wallet you control as the recipient, not a contract.")
     return recipient
+
+
+async def verify_recipient(arc: Rpc, recipient: str) -> None:
+    if quantity(await arc.call("eth_chainId")) != ARC_TESTNET_ID:
+        raise ValueError("The destination RPC is not Arc Testnet. Nothing was sent.")
+    if hex_bytes(await arc.call("eth_getCode", [recipient, "latest"])):
+        raise ValueError("The recipient already has contract code on Arc Testnet. Use a wallet you control.")
 
 
 def max_fee_from_quote(rows: object, threshold: int, amount: int) -> tuple[Decimal, int]:
@@ -226,7 +241,7 @@ def shortfall(wallet: str, plan: Plan, funds: dict) -> str | None:
         )
     if funds["eth"] < funds["eth_needed"]:
         problems.append(
-            f"{wallet} holds {usdc(funds['eth'], decimals=18)} Base Sepolia ETH; gas needs up to "
+            f"{wallet} holds {usdc(funds['eth'], decimals=18)} Base Sepolia ETH; execution needs up to "
             f"{usdc(funds['eth_needed'], decimals=18)}. Use a Base Sepolia faucet from {ETH_FAUCETS}."
         )
     return " ".join(problems) or None
@@ -234,7 +249,7 @@ def shortfall(wallet: str, plan: Plan, funds: dict) -> str | None:
 
 def scan_window(burn_block: int, head: int) -> int:
     """Blocks from the head back to the burn, plus an hour of 2-second Base blocks."""
-    return min(50_000, head - burn_block + 1 + 1_800)
+    return min(50_000, max(head - burn_block, 0) + 1 + 1_800)
 
 
 def verify_burn_receipt(receipt: dict, tx_hash: str, sender: str, plan: Plan) -> Burn:
@@ -248,6 +263,9 @@ def verify_burn_receipt(receipt: dict, tx_hash: str, sender: str, plan: Plan) ->
     if len(logs) != 1:
         raise ValueError(f"Expected exactly one DepositForBurn event, found {len(logs)}.")
     burn = decode_burn(logs[0])
+    if (burn.tx_hash != tx_hash or burn.block_number != quantity(receipt.get("blockNumber"))
+            or burn.block_hash != hash32(receipt.get("blockHash"))):
+        raise ValueError("DepositForBurn event identity does not match its receipt.")
     expected = {"amount": plan.amount, "mint_recipient": plan.recipient, "depositor": sender,
                 "destination_domain": ARC_DOMAIN, "caller": ZERO, "hook": b"",
                 "max_fee": plan.max_fee, "min_finality": plan.threshold}
@@ -257,20 +275,40 @@ def verify_burn_receipt(receipt: dict, tx_hash: str, sender: str, plan: Plan) ->
     return burn
 
 
+async def check_receipt(rpc, receipt: dict, tx_hash: str, sender: str, to: str) -> tuple[int, int]:
+    if (not isinstance(receipt, dict) or hash32(receipt.get("transactionHash")) != tx_hash
+            or address(receipt.get("from")) != sender or address(receipt.get("to")) != to):
+        raise ValueError("Receipt identity does not match the signed transaction.")
+    block_number = quantity(receipt.get("blockNumber"))
+    block_hash = hash32(receipt.get("blockHash"))
+    block = await rpc.call("eth_getBlockByNumber", [hex(block_number), False])
+    if (not isinstance(block, dict) or quantity(block.get("number")) != block_number
+            or hash32(block.get("hash")) != block_hash):
+        raise ValueError("Receipt does not match the current Base Sepolia block.")
+    status = quantity(receipt.get("status"))
+    if status not in (0, 1):
+        raise ValueError("Receipt status is invalid.")
+    return status, block_number
+
+
 async def send_once(rpc, account, sender: str, to: str, data: str, budget: int, label: str,
                     emit: Callable, sleep: Callable) -> dict:
     """Simulate, sign and broadcast exactly once. Unknown delivery never retries."""
     tx = {"from": sender, "to": to, "data": data}
     ok, reason = await rpc.simulate(tx)
     if not ok:
-        raise ValueError(f"{label} simulation reverted: {reason}. Nothing was sent.")
+        raise ValueError(f"{label} simulation reverted: {reason}. This step was not sent.")
+    if to == USDC and quantity(reason) != 1:
+        raise ValueError("The approval simulation returned false. Nothing was sent.")
     gas = quantity(await rpc.call("eth_estimateGas", [tx]))
     gas_limit = (gas * 12 + 9) // 10
     if gas <= 0 or gas_limit > budget:
-        raise ValueError(f"{label} gas estimate is outside the lab's bound. Nothing was sent.")
+        raise ValueError(f"{label} gas estimate is outside the lab's bound. This step was not sent.")
     max_fee_per_gas, tip = await gas_prices(rpc)
-    if gas_limit * max_fee_per_gas > GAS_COST_CAP:
-        raise ValueError(f"{label} gas exceeds the 0.001 ETH lab cap. Nothing was sent.")
+    if gas_limit * max_fee_per_gas > EXECUTION_COST_CAP:
+        raise ValueError(f"{label} execution gas exceeds 0.001 ETH. This step was not sent.")
+    if quantity(await rpc.call("eth_getBalance", [sender, "pending"])) < gas_limit * max_fee_per_gas:
+        raise ValueError(f"{label} needs more Base Sepolia ETH for execution gas. This step was not sent.")
     nonce = quantity(await rpc.call("eth_getTransactionCount", [sender, "pending"]))
     signed = account.sign_transaction({
         "type": 2, "chainId": BASE_CHAIN_ID, "nonce": nonce, "to": bytes.fromhex(to[2:]),
@@ -286,21 +324,30 @@ async def send_once(rpc, account, sender: str, to: str, data: str, budget: int, 
     except Exception:
         emit(f"{label}: broadcast outcome unknown. Not resending. Inspect {BASESCAN}/tx/{local_hash}")
         return {"status": "broadcast_unknown", "step": label, "tx_hash": local_hash}
-    for attempt in range(RECEIPT_POLLS):
+    try:
+        async with asyncio.timeout(RECEIPT_TIMEOUT_SECONDS):
+            for attempt in range(RECEIPT_POLLS):
+                try:
+                    receipt = await rpc.call("eth_getTransactionReceipt", [local_hash])
+                except UpstreamError:
+                    receipt = None
+                if receipt is not None:
+                    break
+                if attempt + 1 < RECEIPT_POLLS:
+                    await sleep(POLL_SECONDS)
+    except TimeoutError:
+        receipt = None
+    if receipt is not None:
         try:
-            receipt = await rpc.call("eth_getTransactionReceipt", [local_hash])
-        except UpstreamError:
-            receipt = None
-        if receipt:
-            if hash32(receipt.get("transactionHash", "")) != local_hash:
-                raise ValueError(f"{label} receipt does not match the signed transaction.")
-            if quantity(receipt.get("status")) != 1:
-                emit(f"{label}: reverted on chain. Gas was spent; no USDC moved in this step.")
-                return {"status": "reverted", "step": label, "tx_hash": local_hash}
-            emit(f"{label}: confirmed in block {quantity(receipt.get('blockNumber')):,}")
-            return {"status": "confirmed", "tx_hash": local_hash, "receipt": receipt}
-        if attempt + 1 < RECEIPT_POLLS:
-            await sleep(POLL_SECONDS)
+            status, block_number = await check_receipt(rpc, receipt, local_hash, sender, to)
+        except (ValueError, UpstreamError):
+            emit(f"{label}: receipt could not be verified. Inspect {BASESCAN}/tx/{local_hash}")
+            return {"status": "receipt_unverified", "step": label, "tx_hash": local_hash}
+        if status == 0:
+            emit(f"{label}: reverted on chain. Gas was spent; no USDC moved in this step.")
+            return {"status": "reverted", "step": label, "tx_hash": local_hash}
+        emit(f"{label}: confirmed in block {block_number:,}")
+        return {"status": "confirmed", "tx_hash": local_hash, "receipt": receipt}
     emit(f"{label}: still unconfirmed. Not resending. Check {BASESCAN}/tx/{local_hash} first.")
     return {"status": "submitted", "step": label, "tx_hash": local_hash}
 
@@ -314,7 +361,7 @@ async def interrupt(
     speed: str = "fast",
     sender: str | None = None,
     dry_run: bool = False,
-    read_key: Callable = getpass.getpass,
+    read_key: Callable = read_hidden_key,
     confirm: Callable = input,
     emit: Callable = print,
     sleep: Callable = asyncio.sleep,
@@ -342,7 +389,8 @@ async def interrupt(
     emit("destinationCaller: 0x" + "00" * 32 + " (anyone may submit the mint)")
     emit("Hook:              none - plain depositForBurn, no Circle forwarding")
     emit(f"Route check:       {route}")
-    emit(f"Gas:               at most 0.001 ETH per transaction (now {max_fee_per_gas:,} wei/gas)")
+    emit(f"Execution gas:     at most 0.001 ETH per transaction (now {max_fee_per_gas:,} wei/gas)")
+    emit("Base also charges a separate L1 data fee.")
     emit("This tool never calls receiveMessage. Do NOT mint this transfer any other way.")
 
     result = {"amount": usdc(units), "recipient": recipient, "max_fee": usdc(max_fee),
@@ -356,7 +404,7 @@ async def interrupt(
             emit(f"Sender holds {usdc(funds['usdc'])} USDC, {usdc(funds['eth'], decimals=18)} ETH; "
                  f"allowance {usdc(funds['allowance'])} USDC "
                  f"(approve {'needed' if funds['needs_approve'] else 'not needed'}).")
-            emit(problem or "Sender is funded for this burn.")
+            emit(problem or "Sender covers the token amount and estimated execution gas.")
             result["funded"] = problem is None
         emit("Dry run: no key requested and nothing sent.")
         return {"status": "dry_run", **result, "approve_data": plan.approve_data,
@@ -365,9 +413,9 @@ async def interrupt(
     if confirm("Type INTERRUPT to burn this testnet USDC on Base Sepolia: ").strip() != "INTERRUPT":
         emit("Cancelled; no signing key requested and no transaction sent.")
         return {"status": "cancelled"}
+    key = read_key("Throwaway Base Sepolia private key (hidden; never saved): ")
     try:
-        key = read_key("Throwaway Base Sepolia private key (hidden; never saved): ").strip()
-        account = Account.from_key(key)
+        account = Account.from_key(key.strip())
     except (ValueError, TypeError):
         raise ValueError("The local signing key is invalid.") from None
     finally:
@@ -401,10 +449,13 @@ async def interrupt(
     tx_hash = step["tx_hash"]
     try:
         burn = verify_burn_receipt(step["receipt"], tx_hash, wallet, plan)
-    except ValueError as exc:
+    except (ValueError, UpstreamError) as exc:
         emit(f"Burn confirmed but NOT verified: {exc} Inspect {BASESCAN}/tx/{tx_hash}")
         return {**result, "status": "burn_unverified", "tx_hash": tx_hash}
-    head = quantity(await rpc.call("eth_blockNumber"))
+    try:
+        head = quantity(await rpc.call("eth_blockNumber"))
+    except UpstreamError:
+        head = burn.block_number
     blocks = scan_window(burn.block_number, head)
     end_block = burn.block_number + 100
     emit("")
@@ -452,7 +503,8 @@ def parser() -> argparse.ArgumentParser:
 
 async def run(args: argparse.Namespace) -> dict:
     circle_url = os.getenv("CIRCLE_SANDBOX_URL", "https://iris-api-sandbox.circle.com")
-    for endpoint in (args.rpc, circle_url):
+    arc_url = os.getenv("ARC_TESTNET_RPC", "https://rpc.testnet.arc.network")
+    for endpoint in (args.rpc, arc_url, circle_url):
         parsed = urlsplit(endpoint)
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
             raise ValueError("RPC and Circle endpoints must be valid HTTP(S) URLs.")
@@ -460,9 +512,11 @@ async def run(args: argparse.Namespace) -> dict:
         raise ValueError("A live burn requires an interactive terminal; keys cannot be piped.")
     async with httpx.AsyncClient(timeout=25) as client:
         rpc = LabRpc(args.rpc, "Base Sepolia RPC", client)
+        recipient = parse_recipient(args.recipient)
+        await verify_recipient(Rpc(arc_url, "Arc Testnet RPC", client), recipient)
         return await interrupt(
             rpc, lambda: circle_fees(client, circle_url), amount=args.amount,
-            recipient=args.recipient, speed=args.speed, sender=args.sender, dry_run=args.dry_run,
+            recipient=recipient, speed=args.speed, sender=args.sender, dry_run=args.dry_run,
         )
 
 

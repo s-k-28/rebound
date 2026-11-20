@@ -30,15 +30,15 @@ Attestation times are Circle's published Base averages ([finality and block conf
 
 ## What it does
 
-1. Checks the RPC is chain `84532` and that TokenMessengerV2 and USDC have deployed code.
+1. Checks the source RPC is chain `84532` and that TokenMessengerV2 and USDC have deployed code. Checks the recipient has no code on Arc Testnet (chain `5042002`). Set `ARC_TESTNET_RPC` to override the public destination RPC for this read.
 2. Fetches Circle's fee quote read-only from `GET /v2/burn/USDC/fees/6/26`. `minimumFee` is in basis points. maxFee = amount × bps / 10,000 × 1.2, rounded up (Circle's fee guide suggests a 10–20% buffer). On November 20 the sandbox quoted 1.3 bps for fast and 0 for standard, so 1 USDC fast gets a maxFee of 0.000156 USDC. Any quote that implies more than 0.01 USDC is refused.
 3. Simulates the burn against TokenMessengerV2. The call must either succeed or revert inside the USDC transfer for lack of allowance or balance. Either result shows the selector, domain 26 and the fee are accepted. Any other revert stops the run.
 4. Prints the review: from, recipient, amount, maxFee, finality, destination domain 26, a zero `destinationCaller` and no hook.
 5. Requires typing `INTERRUPT`. Only then does it read a key with `getpass`. The key is never echoed, logged or saved.
 6. Derives the address and checks its USDC and ETH. If either is short it stops before broadcasting and points to the [Circle faucet](https://faucet.circle.com) for USDC or [Base's faucet list](https://docs.base.org/get-started/get-funds) for ETH.
 7. If the allowance is below the amount, it sends `approve(TokenMessengerV2, amount)` for the exact amount, never unlimited, and waits for a successful receipt.
-8. Sends `depositForBurn(amount, 26, recipient, USDC, 0x0, maxFee, threshold)`. This is the plain CCTP V2 function, selector `0x8e0250ee`, and not `depositForBurnWithHook`. Each step is simulated with `eth_call`, gas-estimated, signed with EIP-1559 fees and broadcast **at most once**.
-9. Decodes the receipt's `DepositForBurn` log with `protocol.decode_burn`. It confirms the amount, recipient, depositor, domain 26, zero caller, empty hook, maxFee and threshold. Any mismatch is reported as `burn_unverified` with exit code 2.
+8. Sends `depositForBurn(amount, 26, recipient, USDC, 0x0, maxFee, threshold)`, the plain CCTP V2 function with selector `0x8e0250ee`. Each step is simulated with `eth_call`, gas-estimated, signed with EIP-1559 fees and broadcast **at most once**. The 0.001 ETH cap applies to execution gas per transaction. Base charges a separate L1 data fee. [OP Stack transaction fees](https://docs.optimism.io/op-stack/transactions/fees)
+9. Matches the receipt to the canonical Base block and decodes `DepositForBurn` with `protocol.decode_burn`. The log must match the receipt's transaction and block, as well as the reviewed amount, recipient, depositor, domain 26, zero caller, empty hook, maxFee and threshold. A verification failure stops the command and prints the transaction hash.
 10. Prints the source hash, log index, block, Basescan link and the scan commands for a fresh Rebound session.
 
 If a broadcast times out or the RPC's answer is unclear, the lab prints the locally computed hash and stops. It never resends. Check that hash before running again. Once an approval confirms, a rerun skips the approval step.
