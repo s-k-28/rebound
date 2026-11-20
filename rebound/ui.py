@@ -2,7 +2,9 @@
 import asyncio
 import json
 import re
+import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -12,6 +14,7 @@ import flet as ft
 from rebound.clients import UpstreamError
 from rebound.examples import EXAMPLE_WALLET, example_stream_transfer, example_transfers
 from rebound.protocol import ZERO, address, hash32
+from rebound.service import MIN_RECOVERY_CONFIRMATIONS
 
 # Ledger palette. See docs/DESIGN.md: ink means settled, the one accent means "act here",
 # amber means waiting and red means the record needs review.
@@ -39,6 +42,12 @@ LIVE_SAMPLE_WALLET = "0x395809d8da4a70145d5060448070a15367df722c"
 LIVE_SAMPLE_END_BLOCK = 61_175_721
 LIVE_SAMPLE_BLOCKS = 200
 CASE_PATH = re.compile(r"/transfer/(0x[0-9a-fA-F]{64})/([0-9]{1,8})/?", re.ASCII)
+
+# The inspector rechecks one selected live transfer while it waits on Base or Circle.
+RECHECK_STATUSES = frozenset({"source_confirming", "awaiting_attestation"})
+RECHECK_SECONDS = 10
+RECHECK_LIMIT_SECONDS = 600
+UNFINISHED_STATUSES = frozenset({"ready", "awaiting_attestation", "source_confirming", "caller_required"})
 
 STATE_COPY = {
     "ready": ("Ready to finish", "A signed message is available. Rebound will recheck it before preparing the destination mint.", "action"),
@@ -85,6 +94,60 @@ def safe_error(exc: Exception) -> str:
     if isinstance(exc, (ValueError, UpstreamError)):
         return str(exc)
     return "The transfer could not be verified. Try again or use a narrower history range."
+
+
+def chain_time(value: object) -> datetime | None:
+    """Read a block timestamp supplied by RecoveryService. Never substitute a local time."""
+    if not isinstance(value, str):
+        return None
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return moment.astimezone(UTC) if moment.tzinfo else None
+
+
+def format_duration(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 120:
+        return f"{seconds} s"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes} min"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 24:
+        return f"{hours} h {minutes} min" if minutes else f"{hours} h"
+    days, hours = divmod(hours, 24)
+    return f"{days} d {hours} h" if hours else f"{days} d"
+
+
+def format_clock(moment: datetime, now: datetime) -> str:
+    """UTC time of day, with the date only when it is not today's date."""
+    return moment.strftime("%H:%M:%S UTC" if moment.date() == now.date() else "%Y-%m-%d %H:%M:%S UTC")
+
+
+def burn_time(item: dict, now: datetime) -> str | None:
+    burned = chain_time(item.get("burned_at"))
+    if burned is None:
+        return None
+    return f"Burned {format_clock(burned, now)}, {format_duration((now - burned).total_seconds())} ago"
+
+
+def mint_time(item: dict, now: datetime) -> str | None:
+    minted = chain_time(item.get("minted_at"))
+    if minted is None:
+        return None
+    burned = chain_time(item.get("burned_at"))
+    after = (f", {format_duration((minted - burned).total_seconds())} after the burn"
+             if burned is not None and minted >= burned else "")
+    return f"Minted {format_clock(minted, now)}{after}"
+
+
+def unfinished_for(item: dict, now: datetime) -> str | None:
+    burned = chain_time(item.get("burned_at"))
+    if burned is None or item.get("status") not in UNFINISHED_STATUSES:
+        return None
+    return f"Unfinished for {format_duration((now - burned).total_seconds())}"
 
 
 def proof_steps(item: dict) -> list[tuple[str, str, str]]:
@@ -236,6 +299,17 @@ class InboxState:
         return await service.prepare(transfer["tx_hash"], transfer["log_index"], signer)
 
 
+@dataclass(eq=False)
+class Recheck:
+    """One automatic recheck run, bound to one selected live transfer."""
+    state: InboxState
+    key: str
+    started: float
+    remaining: int = RECHECK_SECONDS
+    active: bool = True
+    note: str = ""
+
+
 def field_style(**overrides) -> dict:
     style = dict(filled=True, fill_color=SURFACE, border_color=RULE_STRONG, focused_border_color=ACCENT,
                  border_radius=6, cursor_color=ACCENT, autocorrect=False,
@@ -290,6 +364,11 @@ class InboxUI:
         self.replay_item = None
         self.replay_result = None
         self.replay_error = ""
+        self._recheck: Recheck | None = None
+        self._recheck_text: ft.Text | None = None
+        self.client_connected = True
+        self.recheck_sleep = asyncio.sleep
+        self.recheck_clock = time.monotonic
         self.root = ft.Row(expand=True, spacing=0, vertical_alignment=ft.CrossAxisAlignment.STRETCH)
         self.search_input = ft.TextField(hint_text="Filter by hash, address or amount", height=34, width=250,
             on_change=self.search,
@@ -336,6 +415,9 @@ class InboxUI:
         self.page.services.append(self.semantics)
         self.page.on_resize = self.resize
         self.page.on_route_change = self.route_changed
+        # A disconnected tab skips its rechecks until Flet reconnects the session.
+        self.page.on_connect = lambda _: setattr(self, "client_connected", True)
+        self.page.on_disconnect = lambda _: setattr(self, "client_connected", False)
         self.page.add(self.root)
         self._installed = True
         self.render()
@@ -666,15 +748,20 @@ class InboxUI:
                        ft.Container(body, expand=True, padding=ft.Padding.only(bottom=0 if last else 16))],
                       spacing=12, intrinsic_height=True, vertical_alignment=ft.CrossAxisAlignment.STRETCH)
 
-    def proof(self, item):
+    def proof(self, item, now: datetime | None = None):
         live = not self.state.example and not item.get("example")
+        now = now or datetime.now(UTC)
 
         def line(value):
             return self.text(value, 12, INK_2, mono=True, selectable=True)
-        burn = [line(f"Block {item['block_number']:,}, log {item['log_index']}"),
-                line(f"Tx {shorten(item['tx_hash'], 6)}")]
-        if item.get("source_confirmations") is not None:
-            burn.append(line(f"{item['source_confirmations']:,} confirmations"))
+        burned = burn_time(item, now)
+        burn = [line(burned)] if burned else []
+        burn.extend([line(f"Block {item['block_number']:,}, log {item['log_index']}"),
+                     line(f"Tx {shorten(item['tx_hash'], 6)}")])
+        confirmations = item.get("source_confirmations")
+        if confirmations is not None:
+            burn.append(line(f"{confirmations} of {MIN_RECOVERY_CONFIRMATIONS} Base confirmations"
+                             if item["status"] == "source_confirming" else f"{confirmations:,} confirmations"))
         if live and item.get("source_url"):
             burn.append(self.proof_link("Open source receipt", item["source_url"]))
         attestation = []
@@ -683,11 +770,14 @@ class InboxUI:
         if item.get("expiration_block"):
             attestation.append(line(f"Expires at Arc block {item['expiration_block']:,}"))
         mint = []
+        destination_url = item.get("destination_url") if live else None
+        minted = mint_time(item, now) if destination_url else None
+        if minted:
+            mint.append(line(minted))
         if item.get("destination_block") is not None:
             # destination_block is when Rebound read the nonce, not when the mint happened.
             nonce_status = "used" if item["nonce_used"] else "unused"
             mint.append(line(f"Nonce {nonce_status}, read at Arc block {item['destination_block']:,}"))
-        destination_url = item.get("destination_url") if live else None
         if destination_url:
             mint.append(self.proof_link("Open verified Arc receipt", destination_url))
         submitted_url = self.submitted_receipt_url(item)
@@ -758,6 +848,17 @@ class InboxUI:
             head.append(ft.IconButton(ft.Icons.CLOSE, icon_color=INK_3, icon_size=18, on_click=self.back,
                                       tooltip="Close details"))
         checked = (item["checked_at"].replace("T", " ").removesuffix("+00:00") + " UTC") if item.get("checked_at") else None
+        now = datetime.now(UTC)  # One reading per render; relative times never schedule their own updates.
+        status = self.status_mark(item["status"], size=14)
+        stuck = unfinished_for(item, now)
+        if stuck:
+            status = ft.Row([status, self.text(stuck, 12, INK_2, mono=True)], spacing=14, wrap=True, run_spacing=4,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER)
+        proof_header = [self.section_title("Proof", self.text(f"Checked {checked}", 11.5, INK_3, mono=True)
+                                           if checked else None)]
+        recheck = self.recheck_line(item)
+        if recheck is not None:
+            proof_header.append(recheck)
         recipient = ft.Column([
             self.text("CCTP mint recipient" if downstream else "Fixed recipient", 12, INK_3),
             self.text(item["recipient"], 12.5, INK, mono=True, selectable=True),
@@ -766,10 +867,9 @@ class InboxUI:
         ], spacing=3)
         sections = [
             ft.Column([ft.Row(head, vertical_alignment=ft.CrossAxisAlignment.START),
-                       self.status_mark(item["status"], size=14),
+                       status,
                        self.text(item.get("explanation") or description, 13, INK_2)], spacing=8),
-            ft.Column([self.section_title("Proof", self.text(f"Checked {checked}", 11.5, INK_3, mono=True)
-                                          if checked else None), self.proof(item)], spacing=12),
+            ft.Column([*proof_header, self.proof(item, now)], spacing=12),
             recipient,
             self.amounts(item),
             self.next_step(item),
@@ -1035,6 +1135,7 @@ class InboxUI:
         # Drop the previous page's financial state before processing its new URL.
         # In-flight reads keep their old InboxState and cannot replace this route.
         self.state = InboxState()
+        self.drop_recheck()
         self.clear_receipt_editor()
         self.review_error = ""
         self.refresh_error = ""
@@ -1126,6 +1227,85 @@ class InboxUI:
                 self._receipt_request = None
                 self.render()
 
+    def recheck_eligible(self, item: dict | None) -> bool:
+        return (item is not None and not self.state.example and not item.get("example")
+                and not str(item.get("key", "")).startswith("example-")
+                and item.get("status") in RECHECK_STATUSES)
+
+    def rechecking(self, run: Recheck | None) -> bool:
+        """True while this run still belongs to the selected, waiting, error-free transfer."""
+        item = self.state.selected
+        return (run is not None and run is self._recheck and run.active and run.state is self.state
+                and item is not None and item.get("key") == run.key and self.recheck_eligible(item)
+                and not self.refresh_error)
+
+    def recheck_label(self, run: Recheck) -> str:
+        return "Checking now" if self.refreshing else f"Checking again in {run.remaining} s"
+
+    def recheck_line(self, item: dict):
+        self._recheck_text = None
+        run = self._recheck
+        if run is None or run.state is not self.state or item.get("key") != run.key:
+            return None
+        if run.note:
+            return self.text(run.note, 12, INK_3) if self.recheck_eligible(item) else None
+        if not self.rechecking(run):
+            return None
+        self._recheck_text = self.text(self.recheck_label(run), 12, INK_2, mono=True)
+        stop = self.link("Stop", self.stop_recheck, color=INK_2, flush=True)
+        stop.style.alignment = ft.Alignment.CENTER_RIGHT  # Keep the short label on the proof's right edge.
+        return ft.Row([self._recheck_text, ft.Container(expand=True), stop], spacing=12)
+
+    def start_recheck(self) -> None:
+        item = self.state.selected
+        if not self._installed or not self.recheck_eligible(item):
+            return
+        self._recheck = Recheck(self.state, item["key"], self.recheck_clock())
+        self.page.run_task(self.recheck_loop, self._recheck)
+
+    def drop_recheck(self, _=None) -> None:
+        self._recheck = None
+
+    def stop_recheck(self, _=None) -> None:
+        if self._recheck is not None:
+            self.drop_recheck()
+            self.render()
+
+    def show_recheck_countdown(self, run: Recheck) -> None:
+        line = self._recheck_text
+        if line is None or not self.rechecking(run):
+            return
+        line.value = self.recheck_label(run)
+        try:
+            line.update()
+        except RuntimeError as exc:
+            # The countdown is cosmetic. Before the line reaches the client, the next render shows it.
+            if "must be added to the page" not in str(exc):
+                raise
+
+    async def recheck_loop(self, run: Recheck) -> None:
+        """Recheck the selected waiting transfer every RECHECK_SECONDS, one request at a time."""
+        try:
+            while self.rechecking(run):
+                for remaining in range(RECHECK_SECONDS, 0, -1):
+                    run.remaining = remaining
+                    self.show_recheck_countdown(run)
+                    await self.recheck_sleep(1)
+                    if not self.rechecking(run):
+                        return
+                if self.recheck_clock() - run.started >= RECHECK_LIMIT_SECONDS:
+                    run.active = False
+                    run.note = "Stopped checking after 10 min. Refresh this transfer to check again."
+                    self.render()
+                    return
+                if (not self.client_connected or self.state.busy or self.refreshing or self.preparing
+                        or self._receipt_request is not None):
+                    continue
+                run.remaining = RECHECK_SECONDS
+                await self.refresh_transfer()
+        finally:
+            run.active = False
+
     async def refresh_transfer(self, _=None) -> None:
         state, item = self.state, self.state.selected
         if state.busy or state.example or item is None or self.refreshing or self.preparing or self._receipt_request is not None:
@@ -1215,11 +1395,14 @@ class InboxUI:
         changed = item is not self.state.selected
         if changed:
             self.clear_receipt_editor()
+            self.drop_recheck()
         self.state.selected = item
         self.state.prepared = None
         self.caller_input.value = ""
         self.review_error = ""
         self.refresh_error = ""
+        if changed:
+            self.start_recheck()  # Before render, so the first frame already shows the countdown.
         self._revealing_item = item if changed and self.motion_enabled else None
         self.render()
         if self._installed and changed and (reset_scroll or self.motion_enabled):
@@ -1252,6 +1435,7 @@ class InboxUI:
 
     def back(self, _=None) -> None:
         self.clear_receipt_editor()
+        self.drop_recheck()
         self.state.selected = None
         self.state.prepared = None
         self.render()
