@@ -8,7 +8,12 @@
 (() => {
   const status = document.getElementById("status");
   const say = (text) => { status.textContent = text; };
-  const api = "/api/wallet-session";
+  const endpoint = new URL(window.location.href);
+  const suffix = "/wallet/adapter";
+  endpoint.pathname = window.location.pathname.slice(0, -suffix.length) + "/api/wallet-session";
+  endpoint.search = endpoint.hash = "";
+  const api = endpoint.href;
+  const reopen = "Reopen this wallet connection from the Rebound tab.";
   const FIELDS = ["chainId", "data", "from", "gas", "maxFeePerGas", "maxPriorityFeePerGas", "to", "value"];
   const QUANTITY = /^0x(0|[1-9a-f][0-9a-f]*)$/;
   let provider = null;
@@ -16,11 +21,14 @@
   let account = null;
   let claimed = false;
   let stopped = false;
+  let reconnecting = false;
+  let reconnectQueued = false;
+  let connectionValid = false;
 
   async function call(path, body) {
     const options = { method: body === undefined ? "GET" : "POST", cache: "no-store", credentials: "omit",
-      headers: {} };
-    if (token) options.headers[CONFIG.header] = token;
+      redirect: "error", referrerPolicy: "no-referrer", headers: {} };
+    if (token) options.headers[CONFIG.header] = `Bearer ${token}`;
     if (body !== undefined) {
       options.headers["Content-Type"] = "application/json";
       options.body = JSON.stringify(body);
@@ -60,20 +68,31 @@
           nativeCurrency: { name: "USDC", symbol: "USDC", decimals: 18 }, blockExplorerUrls: [CONFIG.explorer],
         }],
       });
+      // Adding a network does not require the wallet to select it (EIP-3085).
+      chain = String(await provider.request({ method: "eth_chainId" })).toLowerCase();
+      if (chain !== CONFIG.chainHex) {
+        await provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: CONFIG.chainHex }] });
+      }
     }
     chain = String(await provider.request({ method: "eth_chainId" })).toLowerCase();
     if (chain !== CONFIG.chainHex) throw new Error("The wallet is not on Arc Testnet.");
     return chain;
   }
 
-  async function connect() {
-    const accounts = await provider.request({ method: "eth_requestAccounts" });
+  async function connect(requestPermission = true) {
+    const accounts = await provider.request({ method: requestPermission ? "eth_requestAccounts" : "eth_accounts" });
     if (!Array.isArray(accounts) || !/^0x[0-9a-fA-F]{40}$/.test(accounts[0] || "")) {
       throw new Error("The wallet did not share an account.");
     }
     const chain = await ensureArc();
-    account = accounts[0].toLowerCase();
-    await call("/connected", { account, chainId: chain });
+    const current = await provider.request({ method: "eth_accounts" });
+    if (!Array.isArray(current) || !/^0x[0-9a-fA-F]{40}$/.test(current[0] || "")) {
+      throw new Error("The selected account is no longer authorized.");
+    }
+    const nextAccount = current[0].toLowerCase();
+    await call("/connected", { account: nextAccount, chainId: chain });
+    account = nextAccount;
+    connectionValid = true;
     say("Connected. Return to the Rebound tab to review and send.");
   }
 
@@ -187,7 +206,7 @@
         await pause(2000);
         continue;
       }
-      if (state === "approved" && !claimed) {
+      if (state === "approved" && !claimed && connectionValid && !reconnecting) {
         if (!(await send())) return;
         continue;
       }
@@ -198,10 +217,23 @@
 
   async function reconnect() {
     if (claimed || stopped) return;
+    connectionValid = false;
+    reconnectQueued = true;
+    if (reconnecting) return;
+    reconnecting = true;
     try {
-      await connect();
-    } catch (error) {
-      say(`Wallet connection stopped: ${String(error.message || error).slice(0, 160)}`);
+      while (reconnectQueued && !claimed && !stopped) {
+        reconnectQueued = false;
+        try {
+          // Events only inspect accounts already exposed by the wallet.
+          await connect(false);
+        } catch (_) {
+          connectionValid = false;
+          say(`Wallet connection changed. ${reopen}`);
+        }
+      }
+    } finally {
+      reconnecting = false;
     }
   }
 
@@ -209,33 +241,42 @@
     const code = String(window.location.hash || "").slice(1);
     // Drop the code from the address bar and history; it works only once anyway.
     window.history.replaceState(null, "", window.location.pathname);
-    if (!/^[A-Za-z0-9_-]{22}$/.test(code)) throw new Error("This wallet link is incomplete. Open it again from Rebound.");
+    if (!window.location.pathname.endsWith(suffix) || !/^[A-Za-z0-9_-]{22}$/.test(code)) throw new Error(reopen);
     token = (await call("/exchange", { code })).token;
+    if (typeof token !== "string" || !/^[A-Za-z0-9_-]{22}$/.test(token)) {
+      token = null;
+      throw new Error(reopen);
+    }
   }
 
   async function start() {
     try {
       await pickUp();
-    } catch (error) {
-      say(String(error.message || error).slice(0, 160));
+    } catch (_) {
+      say(reopen);
       return;
     }
     provider = await waitForProvider();
     if (!provider || typeof provider.request !== "function") {
-      say("No browser wallet was found. Install or unlock one, then reload this tab.");
-      return;
-    }
-    try {
-      await connect();
-    } catch (error) {
-      say(error && error.code === 4001 ? "Connection was rejected in the wallet. Reload this tab to try again."
-        : `Wallet connection stopped: ${String(error.message || error).slice(0, 160)}`);
+      say(`No browser wallet was found. Install or unlock one. ${reopen}`);
       return;
     }
     if (typeof provider.on === "function") {
       provider.on("accountsChanged", reconnect);
       provider.on("chainChanged", reconnect);
     }
+    reconnecting = true;
+    try {
+      await connect();
+    } catch (error) {
+      stopped = true;
+      say(error && error.code === 4001 ? `Connection was rejected in the wallet. ${reopen}`
+        : `Wallet connection stopped. ${reopen}`);
+      return;
+    } finally {
+      reconnecting = false;
+    }
+    if (reconnectQueued) await reconnect();
     await watch();
     stopped = true;
   }
