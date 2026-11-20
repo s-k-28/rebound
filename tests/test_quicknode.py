@@ -434,3 +434,67 @@ def test_blank_walkthrough_wallet_in_env_falls_back_to_the_default(monkeypatch):
     assert Settings.from_env().quicknode_demo_wallet == Settings().quicknode_demo_wallet
     monkeypatch.setenv("REBOUND_QUICKNODE_DEMO_WALLET", "0x" + "11" * 20)
     assert Settings.from_env().quicknode_demo_wallet == "0x" + "11" * 20
+
+
+# ---------------------------------------------------------- recorded Stream
+
+ROOT = Path(__file__).resolve().parent.parent
+STREAM_ID = "c797f5ca-9aa8-4874-b8f1-a291a4066f27"
+
+
+def test_recorded_stream_agrees_with_the_filter_the_route_and_the_controlled_burn():
+    record = q.load_stream_record()
+    assert record is not None and record["id"] == STREAM_ID
+    assert (ROOT / record["filter"]).is_file()
+    assert record["network"] == "Base Sepolia" and record["dataset_id"] == "block_with_receipts"
+    assert f"Dataset: {record['network']}, {record['dataset_id']}" in FILTER.read_text()
+    # The destination path must be the route Rebound actually serves.
+    from rebound.app import create_app
+    routes = {route.path for route in create_app(include_ui=False).routes}
+    assert record["destination_path"] in routes
+    assert record["start_block"] <= record["controlled_burn_block"]
+    seen = record["observed"]
+    assert seen["blocks_sent"] <= seen["blocks_processed"] and seen["last_block_delivered"] >= record["start_block"]
+
+
+def test_stream_record_holds_no_credentials_and_no_destination_host():
+    text = (ROOT / "rebound" / "stream_record.json").read_text().lower()
+    for forbidden in ("http", "app.github.dev", "token\":", "secret", "password", "apikey", "api_key"):
+        assert forbidden not in text, forbidden
+
+
+@pytest.mark.parametrize("content", ["not json", "[]", "{}", '{"id": "nope", "observed": {}}',
+                                     '{"id": "' + STREAM_ID + '"}'])
+def test_malformed_stream_record_is_ignored_rather_than_shown(tmp_path, content):
+    path = tmp_path / "record.json"
+    path.write_text(content)
+    assert q.load_stream_record(path) is None
+    assert q.load_stream_record(tmp_path / "missing.json") is None
+
+
+def test_stream_facts_state_the_recorded_snapshot_without_claiming_it_is_live():
+    facts = dict(q.stream_facts(q.load_stream_record()))
+    assert facts["Stream ID"] == STREAM_ID
+    state = next(value for label, value in facts.items() if label.startswith("State on "))
+    assert state.startswith("Terminated. Last block delivered 61,175,720.") and "not reached" in state
+    assert "POST /api/streams" in facts["Delivers to"]
+
+
+def test_stream_facts_do_not_invent_a_gap_when_the_stream_passed_the_burn():
+    record = q.load_stream_record() | {"observed": {"status": "Active", "last_block_delivered": 61_200_000,
+                                                    "blocks_sent": 1, "errors": 0}}
+    state = next(value for label, value in q.stream_facts(record) if label.startswith("State on "))
+    assert "not reached" not in state and "Active" in state
+
+
+def test_walkthrough_explains_why_quicknode_and_shows_the_recorded_stream():
+    shown = screen_text(inbox().stream_context())
+    assert "Why QuickNode Streams" in shown and "No hash to start from" in shown
+    assert STREAM_ID in shown and "snapshot, not live state" in shown and "Terminated" in shown
+
+
+def test_the_stream_id_is_findable_in_the_docs_judges_read():
+    for doc in ("README.md", "docs/QUICKNODE.md", "docs/DEVPOST.md"):
+        assert STREAM_ID in (ROOT / doc).read_text(), doc
+    assert "Why QuickNode Streams" in (ROOT / "README.md").read_text()
+    assert "## Why this Stream" in (ROOT / "docs" / "QUICKNODE.md").read_text()

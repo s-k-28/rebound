@@ -14,7 +14,13 @@ import flet as ft
 from rebound.clients import UpstreamError
 from rebound.examples import EXAMPLE_WALLET, example_stream_transfer, example_transfers
 from rebound.protocol import ZERO, address, hash32
-from rebound.quicknode import delivered_by_quicknode, evidence_steps, walkthrough_checks
+from rebound.quicknode import (
+    delivered_by_quicknode,
+    evidence_steps,
+    load_stream_record,
+    stream_facts,
+    walkthrough_checks,
+)
 from rebound.service import MIN_RECOVERY_CONFIRMATIONS
 
 # Ledger palette. See docs/DESIGN.md: ink means settled, the one accent means "act here",
@@ -1200,7 +1206,34 @@ class InboxUI:
             self.button("Use this wallet", use_wallet, primary=True, icon=ft.Icons.WALLET),
             self.dialog_rows(rows),
             self.text("Each check is separate. Pending means not yet observed. Simulated means synthetic data.", 12, INK_3),
+            *self.stream_context(),
         ]))
+
+    def stream_context(self) -> list:
+        """Why Rebound uses QuickNode Streams, and the recorded state of its Stream."""
+        controls = [
+            self.text("Why QuickNode Streams", 13, INK, ft.FontWeight.W_700),
+            self.dialog_rows([
+                ("No hash to start from",
+                 "After a lost session a user has only an address. Reading chain history over RPC is bounded, "
+                 "slow and often rate limited."),
+                ("Filtered at the source",
+                 "The Stream reads every Base Sepolia block and sends Rebound only Circle CCTP V2 USDC burns."),
+                ("Index, then verify",
+                 "Rebound stores each delivery, so a wallet search is instant. It then rechecks the source "
+                 "receipt, Circle and Arc before showing a status."),
+            ], numbered=True),
+        ]
+        record = load_stream_record()
+        if record is not None:
+            controls.extend([
+                self.text("This Stream", 13, INK, ft.FontWeight.W_700),
+                self.dialog_rows([(label, self.text(value, 12.5, INK_2, mono=label == "Stream ID", selectable=True))
+                                  for label, value in stream_facts(record)]),
+                self.text("Recorded from the QuickNode dashboard. Rebound does not query QuickNode, so this is a "
+                          "snapshot, not live state.", 12, INK_3),
+            ])
+        return controls
 
     async def copy_evidence(self, _=None) -> None:
         item = self.state.selected

@@ -11,8 +11,16 @@ A step is "verified" only when the row carries the evidence for it. Anything
 else is "pending". Synthetic data is always "simulated".
 """
 
+import json
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
+
+# The QuickNode Stream Rebound uses, as recorded from its dashboard. It sits inside the package so
+# the Docker image carries it. It holds no credentials, and the destination is a path, not a host.
+STREAM_RECORD_PATH = Path(__file__).with_name("stream_record.json")
+_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 # Delivery states where the source receipt could not confirm the burn.
 UNVERIFIED_STATUSES = {"unavailable", "source_changed", "unsupported"}
@@ -146,4 +154,48 @@ def walkthrough_checks(*, enabled: bool, delivered: int, last_received: int | No
         live,
         discovery,
         mint,
+    ]
+
+
+def load_stream_record(path: Path = STREAM_RECORD_PATH) -> dict | None:
+    """The recorded Stream, or None when the file is missing or malformed.
+
+    Rebound never queries QuickNode, so this is a snapshot taken from the dashboard on
+    ``recorded_at``. Callers must present it as recorded, not as live state.
+    """
+    try:
+        record = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict) or not _UUID.fullmatch(str(record.get("id", ""))):
+        return None
+    if not isinstance(record.get("observed"), dict):
+        return None
+    return record
+
+
+def stream_facts(record: dict) -> list[tuple[str, str]]:
+    """Label and value rows describing the recorded Stream, for the walkthrough dialog."""
+    seen = record["observed"]
+    blocks_sent = seen.get("blocks_sent")
+    last = seen.get("last_block_delivered")
+    state = [f"{seen.get('status', 'Unknown')}."]
+    if isinstance(last, int):
+        state.append(f"Last block delivered {last:,}.")
+    if isinstance(blocks_sent, int):
+        state.append(f"{blocks_sent:,} blocks matched the filter.")
+    if isinstance(seen.get("errors"), int):
+        state.append(f"{seen['errors']} delivery errors.")
+    burn = record.get("controlled_burn_block")
+    if isinstance(burn, int) and isinstance(last, int) and last < burn:
+        state.append(f"The controlled burn at block {burn:,} was not reached.")
+    start = record.get("start_block")
+    return [
+        ("Name", str(record.get("name", ""))),
+        ("Stream ID", record["id"]),
+        ("Source", f"{record.get('network', '')}, {record.get('dataset', '')}"),
+        ("Starts at", f"Block {start:,}, no end." if isinstance(start, int) else "Not recorded."),
+        ("Filter", f"{record.get('filter', '')}. Keeps only CCTP V2 USDC burns."),
+        ("Delivers to", f"POST {record.get('destination_path', '')}, {record.get('destination_auth', '')}"),
+        (f"State on {record.get('recorded_at', '?')}", " ".join(state)),
     ]

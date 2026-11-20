@@ -23,16 +23,32 @@ Use Base Sepolia block `61175721` and wallet `0x395809d8da4a70145d5060448070a153
 
 ## Record for the README and video
 
-| Field | Record after actual setup |
+| Field | Recorded value |
 |---|---|
 | Network | Base Sepolia |
-| Dataset | Block with Receipts |
-| Filter | Exact deployed `streams/filter.js` revision |
-| Destination | HTTPS webhook path, with credentials redacted |
-| Stream ID | Actual ID returned by QuickNode |
-| History | Backfill start/end and current tip coverage |
-| Delivery evidence | Known source burn arriving through the Stream and visible in the inbox |
+| Dataset | Block with Receipts (`block_with_receipts`) |
+| Filter | Identical to `streams/filter.js`. Read in the dashboard editor on 2026-11-20 |
+| Destination | Webhook, `POST /api/streams`, no payload compression, 30 second timeout. Credentials redacted |
+| Stream ID | `c797f5ca-9aa8-4874-b8f1-a291a4066f27` (name: Rebound Base Sepolia burns) |
+| History | Starts at block 61,159,868 with no end. Batch size 1. Region USA East. Free plan |
+| State on 2026-11-20 | **Terminated.** Last block delivered 61,175,720. 15,861 blocks processed, 0 sent, 8 errors |
+| Delivery evidence | Pending. The burn at block 61,175,721 was never delivered |
 | Recovery role | Discovery feed; canonical verification remains a separate service step |
+
+The machine-readable copy is [`rebound/stream_record.json`](../rebound/stream_record.json). The app shows it under **QuickNode walkthrough**. Update that file whenever the dashboard changes, and keep `recorded_at` current.
+
+## Why this Stream
+
+A user who lost their session has an address and no transaction hash. Reading chain history over RPC is bounded to a block window and public RPCs often limit historical log queries. The Stream does that work once, at QuickNode, as each block arrives. The filter keeps only successful receipts that contain a `DepositForBurn` from Circle's TokenMessengerV2 for native Base Sepolia USDC, so Rebound receives matching burns and nothing else. Rebound stores each delivery, which makes the wallet search a database read. Every result is then rechecked against the source receipt, Circle's attestation and Arc, so the Stream is a discovery feed and never the source of truth.
+
+## Observed state and how to finish the live check
+
+The dashboard shows the Stream as **Terminated** with 8 errors, and its last delivered block is 61,175,720, one block before the controlled burn. It does not state a cause, and the Logs tab was empty. The destination was a Codespace URL, which only works while that Codespace is running.
+
+1. Start the app with this branch and the existing `REBOUND_STREAM_SECURITY_TOKEN`, and confirm the destination URL answers.
+2. In QuickNode, restart this Stream or duplicate it with a start block of 61,175,721 so the burn is the first block processed.
+3. Run **Find transfers via QuickNode** with only the wallet address. Rebound should label the result **Discovered via QuickNode Streams**.
+4. Update `rebound/stream_record.json` and the validation table in the README.
 
 An HTTP request with a fixture proves the adapter works; it does not prove a QuickNode Stream exists. Streams are billed for blocks processed even if a filter returns no matching logs.
 

@@ -93,7 +93,17 @@ Run the CLI and inbox with the same `REBOUND_DB` to see a locally recovered rece
 The unsigned review shows the caller’s Arc balance and gas budget separately from the CCTP protocol fee. Arc gas uses the native USDC balance in 18-decimal units. The CLI checks the caller’s pending balance before asking for a key and checks it again before signing. [Arc wallet integration guide](https://community.arc.io/public/externals/supporting-arc-in-wallets-one-balance-usdc-fees-and-complete-history-2026-09-10)
 ## QuickNode Streams integration
 
-Rebound uses QuickNode Streams to help users find interrupted USDC transfers with just a public wallet address. An active Stream monitors Base Sepolia for Circle CCTP V2 USDC burn events and sends matching events to Rebound’s authenticated webhook.
+Rebound uses QuickNode Streams to help users find interrupted USDC transfers with just a public wallet address. A QuickNode Stream reads Base Sepolia and sends only Circle CCTP V2 USDC burn events to Rebound’s authenticated webhook.
+
+**Why QuickNode Streams.** After a lost session, a user has an address and no transaction hash. The alternatives are weaker for this job:
+
+| Approach | Problem for a wallet-only lookup |
+|---|---|
+| Scan chain history over RPC | Bounded to a block window, slower the further back it reaches, and public RPCs rate-limit or refuse historical log queries. |
+| Poll the chain continuously | Rebound would need its own always-on indexer and reorg handling. |
+| **QuickNode Streams** | Filtered at the source and pushed as blocks arrive. Rebound stores only matching burns, so a wallet search is a database read, followed by the independent receipt, Circle and Arc checks. |
+
+The filter runs on QuickNode, so Rebound receives matching burns only. Our Stream processed 15,861 blocks and sent Rebound none of them, because none matched the filter. Rebound never had to read or discard those blocks.
 
 When a user selects **Find transfers via QuickNode**, Rebound looks up events associated with their wallet in the persisted Stream index and checks the original burn receipt, Circle’s attestation, and Arc’s on-chain state. This search reads the index only and does not fall back to a source RPC history scan. The user can see whether the transfer is pending, ready to finish, or already complete without looking up the original transaction hash.
 
@@ -120,6 +130,20 @@ flowchart LR
 | Webhook | `POST /api/streams`, QuickNode signature over nonce, timestamp and body, 15 minute window, plain or gzip JSON | Only the holder of the Security token can add to the index. |
 | Index | SQLite, with the delivery time and signature status of each burn | The wallet search needs no RPC history scan and can say how each result arrived. |
 
+**Our Stream.** The same facts are shown in the app under **QuickNode walkthrough**, from [`rebound/stream_record.json`](rebound/stream_record.json).
+
+| Field | Value |
+|---|---|
+| Name | Rebound Base Sepolia burns |
+| Stream ID | `c797f5ca-9aa8-4874-b8f1-a291a4066f27` |
+| Source | Base Sepolia, Block with Receipts |
+| Starts at | Block 61,159,868, no end, batches of 1 |
+| Filter | The deployed filter is identical to [`streams/filter.js`](streams/filter.js) |
+| Delivery | `POST /api/streams`, signed with the destination’s security token |
+| State on 2026-11-20 | **Terminated.** Last block delivered 61,175,720, 15,861 blocks processed, 0 matched, 8 delivery errors |
+
+The Stream stopped at block 61,175,720, one block before the controlled burn at block 61,175,721, so that burn was never delivered. The dashboard does not state a cause. The record is a snapshot of the dashboard. Rebound does not query QuickNode.
+
 How a result is labelled depends on how it arrived:
 
 | Delivery | Label in the inspector | Counts as live QuickNode delivery |
@@ -135,10 +159,12 @@ For a Stream-found transfer the inspector shows **Burn confirmed → Delivered b
 | Check | Result | Evidence | Status |
 |---|---|---|---|
 | Signed sample delivery | QuickNode **Send Payload** passed | [Webhook setup test](docs/QUICKNODE.md#webhook-setup-test) | Observed |
+| Deployed Stream configuration | Base Sepolia, Block with Receipts, webhook to `/api/streams`, and a filter identical to `streams/filter.js` | Read from the QuickNode dashboard, 2026-11-20 | Verified |
+| Stream state | Terminated one block before the controlled burn, with 8 delivery errors | Dashboard overview, 2026-11-20 | Observed, needs a restart |
 | Filter contract | Constants match the protocol, and the filter keeps only successful canonical USDC burns | `tests/test_quicknode.py` | Verified |
 | Simulated delivery | Synthetic example shows the labelled flow | Demo wallet, **Show simulated Stream delivery** | Simulated |
 | Local adapter delivery | Real controlled burn (block 61,175,721, log 4) found from the wallet alone; source receipt, Circle attestation and the completed Arc mint matched | Local run, 2026-11-20, labelled as an endpoint test | Verified as adapter test |
-| Live Stream delivery of a real burn | Not yet observed | Needs a burn delivered with a QuickNode signature | Pending |
+| Live Stream delivery of a real burn | Not yet observed. The Stream ended before reaching the burn | Needs the Stream restarted at block 61,175,721 with a reachable destination | Pending |
 | Wallet-only discovery from a live delivery | Not yet observed | Follows the live delivery | Pending |
 | Completed Arc mint tied to a live delivery | The controlled burn’s mint is complete ([evidence](docs/LIVE-RECOVERY.md)) but is not yet tied to a live delivery | Follows the live delivery | Pending |
 

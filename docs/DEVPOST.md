@@ -32,7 +32,7 @@ Provider failures show as unavailable and never as an empty inbox. Rebound holds
 
 **Live proof (November 20, testnet).** We burned 1 USDC on Base Sepolia and deliberately skipped the mint ([source burn](https://sepolia.basescan.org/tx/0x7e4334109c120f9da71e01116190804a9d91f2fd5ec07cfd7196a649e68e3f23)). A fresh Rebound session found it from the wallet address alone and marked it ready. Rebound then finished it on Arc ([destination mint](https://explorer.testnet.arc.io/tx/0x92020b4554591c5afc4ae31aff0a8906fc19d1a17f2bd1773e1592762ea0a0a5)), 99 seconds after the burn, and refused a second attempt. The inspector shows the same times from the chains: burned 06:43:33 UTC, minted 06:45:12 UTC. A lookup ending at 06:44 UTC finds this burn again from the address. [Full record](LIVE-RECOVERY.md)
 
-Rebound uses Circle CCTP V2 and USDC, Arc Testnet, Circle's attestation API, Base Sepolia, Python, FastAPI, Flet and SQLite. A QuickNode Streams adapter accepts signed deliveries. QuickNode's signed sample delivery passed. Discovery of a live burn through the Stream is pending a recorded live delivery. [QuickNode status](QUICKNODE.md#webhook-setup-test) Rebound uses Circle's deployed TokenMessengerV2 and MessageTransmitterV2. [Contract addresses](../README.md#contracts-used)
+Rebound uses Circle CCTP V2 and USDC, Arc Testnet, Circle's attestation API, Base Sepolia, Python, FastAPI, Flet and SQLite. A QuickNode Stream (`c797f5ca-9aa8-4874-b8f1-a291a4066f27`) filters Base Sepolia for Circle CCTP V2 USDC burns and delivers them to a signed webhook, so a wallet search is a database read instead of a history scan. [Why this Stream](QUICKNODE.md#why-this-stream) QuickNode's signed sample delivery passed. The Stream was terminated one block before the controlled burn, so discovery of a live burn through it is pending. [QuickNode status](QUICKNODE.md#observed-state-and-how-to-finish-the-live-check) Rebound uses Circle's deployed TokenMessengerV2 and MessageTransmitterV2. [Contract addresses](../README.md#contracts-used)
 
 ## What makes it unique?
 
@@ -76,4 +76,4 @@ Upload in this order. Images 1 to 5 and 7 use live testnet data. Image 6 is synt
 | Agent tools | [MCP server](MCP.md) |
 | Gallery | [Seven images with captions](images/devpost/README.md) |
 | Video | Pending verification |
-| QuickNode Streams | Add after observing a real Stream delivery |
+| QuickNode Streams | [Why and Stream record](QUICKNODE.md#why-this-stream). Live delivery pending |
