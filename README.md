@@ -1,4 +1,14 @@
+<div align="center">
+
 # Rebound
+
+**Find it. Prove it. Finish it.** Recover interrupted USDC transfers from Base to Arc, starting from nothing but a wallet address.
+
+![Track](https://img.shields.io/badge/UBC%202026-DeFi%20%26%20Onchain%20Apps-0B6B4A) ![Chain](https://img.shields.io/badge/Chain%20award-Best%20use%20of%20Arc-0B6B4A) ![CCTP](https://img.shields.io/badge/Circle-CCTP%20V2-2775CA) ![Tests](https://img.shields.io/badge/tests-544%20passing-2ea44f) ![Python](https://img.shields.io/badge/python-3.13-3776AB)
+
+<img src="docs/images/flow.svg" alt="Animated flow: USDC burned on Base Sepolia, attested by Circle, minted on Arc by Rebound" width="100%">
+
+</div>
 
 Rebound finds interrupted USDC transfers from a public wallet address. It checks the source receipt, matches Circle’s message and reads Arc’s nonce state so users can decide whether to wait or finish the existing transfer.
 
@@ -9,6 +19,12 @@ Read the [PRD](docs/PRD.md), [implementation and release plan](docs/superpowers/
 ![Rebound inspector showing the live 1 USDC transfer: Base Sepolia burn verified, Circle attestation matched, Arc mint completed 99 s after the burn](docs/images/live-completed-case.jpg)
 
 *Live Base Sepolia and Arc Testnet data, captured November 20, 2026.*
+
+## See it work
+
+![Rebound demo: paste a wallet address, find the live 1 USDC transfer, then review the recovery of an unfinished burn](docs/images/demo.gif)
+
+*Real app, live testnet data, sped up 1.5x.*
 
 ## Submission at a glance
 
