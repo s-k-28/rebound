@@ -15,6 +15,7 @@ from rebound.clients import Circle, RangeLimitError, Rpc, UpstreamError, quantit
 from rebound.store import CandidateStore, IndexedBurn
 
 MIN_RECOVERY_CONFIRMATIONS = 12
+BLOCK_TIME_CACHE_SIZE = 4096
 
 
 @dataclass(frozen=True)
@@ -117,6 +118,18 @@ class ArcGasQuote:
         return max(0, self.maximum_cost - self.balance)
 
 
+def _remember_block_time(times: dict[str, int] | None, block: dict) -> None:
+    """Keep a canonical block's timestamp, keyed by the block hash that commits to it."""
+    if times is None:
+        return
+    try:
+        times[p.hash32(block.get("hash"))] = quantity(block.get("timestamp"))
+    except (ValueError, UpstreamError):
+        return
+    while len(times) > BLOCK_TIME_CACHE_SIZE:
+        times.pop(next(iter(times)))
+
+
 async def arc_gas_quote(rpc: Rpc, caller: str, gas_limit: int, *, block: str = "latest") -> ArcGasQuote:
     price, balance = await _gather_reads(
         rpc.call("eth_gasPrice"), rpc.call("eth_getBalance", [caller, block]),
@@ -127,7 +140,8 @@ async def arc_gas_quote(rpc: Rpc, caller: str, gas_limit: int, *, block: str = "
     return ArcGasQuote(price, gas_limit, quantity(balance))
 
 
-async def verify_arc_mint_receipt(rpc: Rpc, receipt: object, tx_hash: str, raw: str, message: p.Message) -> bool:
+async def verify_arc_mint_receipt(rpc: Rpc, receipt: object, tx_hash: str, raw: str, message: p.Message,
+                                  *, block_times: dict[str, int] | None = None) -> bool:
     """Match a mint to its canonical Arc block and original attested message."""
     if not isinstance(receipt, dict) or not p.matches_mint_receipt(receipt, tx_hash, raw, message):
         return False
@@ -138,6 +152,7 @@ async def verify_arc_mint_receipt(rpc: Rpc, receipt: object, tx_hash: str, raw: 
         if (not isinstance(block, dict) or p.hash32(block.get("hash")) != block_hash
                 or quantity(block.get("number")) != block_number):
             return False
+        _remember_block_time(block_times, block)
         transaction_index = quantity(receipt["transactionIndex"]) if "transactionIndex" in receipt else None
         transactions = block.get("transactions")
         if not isinstance(transactions, list):
@@ -186,6 +201,7 @@ class RecoveryService:
         self._readiness_lock = asyncio.Lock()
         self._readiness_cache: dict | None = None
         self._readiness_expires = 0.0
+        self._block_times: dict[str, int] = {}
 
     async def _verify_chain(self, rpc: Rpc, chain: int, contract: str):
         chain_id, code = await _gather_reads(
@@ -396,6 +412,7 @@ class RecoveryService:
             if (not isinstance(transactions, list) or transaction_index >= len(transactions)
                     or p.hash32(transactions[transaction_index]) != tx_hash):
                 raise SourceChanged("Source transaction is not at its canonical block position.")
+            _remember_block_time(self._block_times, block)
             logs = receipt["logs"]
             if not isinstance(logs, list):
                 raise ValueError("Invalid receipt logs.")
@@ -478,7 +495,15 @@ class RecoveryService:
             receipt = await self.arc.call("eth_getTransactionReceipt", [tx_hash])
         except (ValueError, UpstreamError):
             return None
-        return receipt if await verify_arc_mint_receipt(self.arc, receipt, tx_hash, attestation.raw, attestation.message) else None
+        verified = await verify_arc_mint_receipt(self.arc, receipt, tx_hash, attestation.raw, attestation.message,
+                                                 block_times=self._block_times)
+        return receipt if verified else None
+
+    def _block_time(self, block_hash: str) -> str | None:
+        timestamp = self._block_times.get(block_hash)
+        if timestamp is None:
+            return None
+        return datetime.fromtimestamp(timestamp, UTC).isoformat(timespec="seconds")
 
     async def _verified_arc_receipt(self, burn: p.Burn, attestation: Attestation) -> dict | None:
         hint = attestation.receipt_hint
@@ -567,6 +592,7 @@ class RecoveryService:
             "source_confirmations": None,
             "destination_block": None, "nonce_used": None, "expiration_block": None,
             "delivery_mode": None, "forward_state": None,
+            "burned_at": None, "minted_at": None,
         }
         if destination_hash is not None:
             row.update(submitted_destination_hash=destination_hash,
@@ -577,6 +603,7 @@ class RecoveryService:
             else:
                 self._match_receipt_burn(receipt_burns, burn.log_index, burn)
             row["source_verified"] = True
+            row["burned_at"] = self._block_time(burn.block_hash)
             if burn.destination_domain != 26:
                 raise ValueError("Unsupported destination route.")
             if source_head is None:
@@ -602,6 +629,7 @@ class RecoveryService:
                     receipt = await self._verified_arc_receipt(burn, attested)
                     if receipt is not None:
                         row["destination_url"] = f"{p.ARC_EXPLORER}/tx/{p.hash32(receipt['transactionHash'])}"
+                        row["minted_at"] = self._block_time(p.hash32(receipt["blockHash"]))
                     if destination_hash is not None:
                         submitted = receipt
                         if receipt is None or p.hash32(receipt["transactionHash"]) != destination_hash:

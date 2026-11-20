@@ -413,6 +413,62 @@ async def test_submitted_receipt_requires_one_explicit_nonnegative_event_index(s
                                       destination_hash="0x" + "ae" * 32)
 
 
+def with_base_block_time(app, timestamp="0x6affec15"):
+    """Add a timestamp to the Base blocks the fixture returns (Base Sepolia block 61,175,721)."""
+    original = app.base.call
+
+    async def base_call(method, params=None):
+        result = await original(method, params)
+        return result | {"timestamp": timestamp} if method == "eth_getBlockByNumber" else result
+
+    app.base.call = base_call
+
+
+async def test_burn_and_mint_times_come_from_the_canonical_blocks_already_read(submitted_arc_receipt):
+    app, state, tx_hash, _, destination = submitted_arc_receipt
+    state["messages"] = [{"status": "complete", "message": message_hex(),
+                          "attestation": "0x" + "11" * 65, "destinationMintTxHash": tx_hash}]
+    destination["block"]["timestamp"] = "0x6affec78"  # Arc Testnet block 73,147,365
+    with_base_block_time(app)
+    for row in [(await app.scan(WALLET, blocks=150))["transfers"][0],
+                (await app.inspect_transaction("0x" + "cd" * 32, log_index=3))["transfers"][0]]:
+        assert row["status"] == "completed"
+        assert row["destination_url"] == f"https://explorer.testnet.arc.io/tx/{tx_hash}"
+        assert (row["burned_at"], row["minted_at"]) == ("2026-11-20T06:43:33+00:00", "2026-11-20T06:45:12+00:00")
+
+
+async def test_waiting_burn_has_a_time_but_no_mint_time(setup_service):
+    app, state = setup_service
+    state["circle_status"] = 404
+    with_base_block_time(app)
+    row, = (await app.scan(WALLET, blocks=150))["transfers"]
+    assert row["status"] == "awaiting_attestation"
+    assert (row["burned_at"], row["minted_at"]) == ("2026-11-20T06:43:33+00:00", None)
+
+
+async def test_missing_or_reorged_block_time_is_never_filled_in(setup_service):
+    app, state = setup_service
+    row, = (await app.scan(WALLET, blocks=150))["transfers"]
+    assert row["status"] == "ready" and (row["burned_at"], row["minted_at"]) == (None, None)
+    with_base_block_time(app)
+    assert (await app.scan(WALLET, blocks=150))["transfers"][0]["burned_at"] is not None
+    state["canonical"] = False  # The cached time belongs to a block hash that is no longer canonical.
+    row, = (await app.scan(WALLET, blocks=150))["transfers"]
+    assert row["status"] == "source_changed" and row["burned_at"] is None
+
+
+def test_block_time_cache_skips_invalid_blocks_and_stays_bounded(monkeypatch):
+    monkeypatch.setattr(service, "BLOCK_TIME_CACHE_SIZE", 2)
+    times = {}
+    for block in [{"hash": "0x" + "01" * 32, "timestamp": "6affec15"}, {"hash": "0x" + "01" * 32},
+                  {"hash": "not-a-hash", "timestamp": "0x1"}, {"timestamp": "0x1"}]:
+        service._remember_block_time(times, block)
+    assert times == {}
+    for index in range(1, 4):
+        service._remember_block_time(times, {"hash": "0x" + f"{index:02x}" * 32, "timestamp": hex(index)})
+    assert times == {"0x" + "02" * 32: 2, "0x" + "03" * 32: 3}
+
+
 async def test_unrelated_wallet_is_not_attributed_a_transfer(setup_service):
     app, _ = setup_service
     assert (await app.scan(OTHER, blocks=150))["transfers"] == []
