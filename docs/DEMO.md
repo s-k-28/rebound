@@ -85,6 +85,19 @@ If a controlled burn is ready on pitch day, use 1:20–2:25 for the local review
 7. Attempt preparation again for the **same source transaction hash and log index**. Capture the completed-state refusal before another transaction can be prepared. This is a state check, not a second burn or another broadcast.
 8. Separately show the clearly labeled restricted-caller example and explain why Rebound refuses to bypass the restriction.
 
+## QuickNode Streams walkthrough
+
+Use this short sequence to show discovery from a QuickNode-delivered burn. Everything here uses a public testnet address. Never show a key, webhook token or RPC credential.
+
+1. Open the app in a fresh browser session with no saved history. Open **QuickNode walkthrough** and show the five separate checks. Anything not yet observed reads Pending.
+2. Select **Use this wallet**, which fills only the public walkthrough address.
+3. Select **Find transfers via QuickNode**. State that this search reads the Stream index and does not scan source history.
+4. Open the matching transfer. Show **Discovered via QuickNode Streams**, the Base Sepolia block number, **View original burn**, and the flow **Burn confirmed → Delivered by QuickNode → Transfer status verified**.
+5. In the explorer, match the burn hash to the Stream’s delivery record in the QuickNode dashboard.
+6. Reopen **QuickNode walkthrough** to show live delivery, wallet-only discovery and the Arc mint as separate checks.
+
+If the label reads **Stream endpoint (no QuickNode signature)** or **Simulated Stream delivery**, the delivery did not come from QuickNode. Say so, and do not present it as a live delivery.
+
 ## Final sign-off checklist
 
 The first five checks were verified in the [controlled testnet run](LIVE-RECOVERY.md).

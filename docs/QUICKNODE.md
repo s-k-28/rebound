@@ -15,7 +15,9 @@ For local adapter checks, set `REBOUND_STREAM_SECRET` and send it in `x-rebound-
 
 The receiver stores event candidates in SQLite. Duplicate delivery does not create another recovery action. Canonical source receipt/block, the Circle message, destination nonce and actual caller are independently rechecked before preparation. Reorged or removed candidates cannot authorize a mint.
 
-Use **Search Stream index** in the inbox or `uv run python -m rebound.cli stream-index "$WALLET"` after delivery. This search reads candidates received through the webhook and verifies them with source receipts and destination chain state. It does not run a source `eth_getLogs` history scan. The inspector shows **Discovered via · Stream delivery** when the indexed event matches the delivered block hash. The coverage note applies even when no transfers are found.
+Use **Find transfers via QuickNode** in the inbox or `uv run python -m rebound.cli stream-index "$WALLET"` after delivery. This search reads candidates received through the webhook and verifies them with source receipts and destination chain state. It does not run a source `eth_getLogs` history scan. The inspector shows **Discovered via · QuickNode Streams** only when the delivery carried a valid QuickNode signature and its block hash matches the log. A burn accepted with the local shared secret is labelled **Stream endpoint (no QuickNode signature)** and is not counted as a live delivery. QuickNode does not report block coverage to Rebound, so the search states what it read and makes no coverage claim. An empty result is not proof that no transfer exists.
+
+The inbox also has a **QuickNode walkthrough** dialog. It fills the walkthrough wallet and tracks five checks separately: signed sample delivery, simulated delivery, live Stream delivery, wallet-only discovery and a completed Arc mint. The walkthrough wallet defaults to the throwaway testnet wallet in [LIVE-RECOVERY.md](LIVE-RECOVERY.md). Set `REBOUND_QUICKNODE_DEMO_WALLET` to a public address to use another.
 
 Use Base Sepolia block `61175721` and wallet `0x395809d8da4a70145d5060448070a15367df722c` for a focused backfill check. The expected match is source log `4`. Check `/api/ready` for `stream_ingestion_configured` on the deployment receiving the webhook. [Controlled recovery evidence](LIVE-RECOVERY.md)
 
@@ -41,4 +43,4 @@ Official references: [filters](https://www.quicknode.com/docs/streams/filters), 
 QuickNode's **Check Connection** returned `401 Invalid or stale Stream signature`.
 The separate **Send Payload** test reported **Stream test successful**.
 In a separate local adapter check, the real controlled Base receipt passed through the filter, signed gzip payload and wallet-only Stream index lookup. Rebound linked the matching canonical Arc receipt.
-Live Base Sepolia burn delivery still needs to be verified with **Search Stream index**.
+Live Base Sepolia burn delivery still needs to be verified with **Find transfers via QuickNode**.
