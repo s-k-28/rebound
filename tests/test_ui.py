@@ -3,7 +3,22 @@ from types import SimpleNamespace
 
 import pytest
 
-from rebound import ui
+from rebound import protocol, ui
+
+
+def test_related_amounts_preserve_large_uint256_fractional_units():
+    amount = protocol.usdc(10**60 + 123_457)
+    assert ui.aligned_amounts(amount, "0.000001", "0.123456") == [
+        f"{10**54:,}.123457", "0.000001", "0.123456"]
+
+
+def test_example_proof_is_labeled_inside_the_proof_section():
+    app = ui.InboxUI(object(), object())
+    example = ui.example_transfers()[0]
+    proof = app.proof(example)
+    assert "SIMULATED PROOF" in proof.controls[0].content.value
+    live = app.proof(example | {"example": False, "source_verified": True})
+    assert all(not isinstance(control, ui.ft.Container) for control in live.controls)
 
 
 class RecordingService:
