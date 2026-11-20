@@ -40,14 +40,18 @@ The rule is that **ink means settled, the accent means you can act here, amber m
 
 | Token | Hex | Use |
 |---|---|---|
-| `PAPER` | `#F3F4F2` | Page ground: cool neutral, not cream |
+| `PAPER` | `#EEF1EE` | Page ground: cool neutral with a faint green cast, not cream |
 | `SURFACE` | `#FFFFFF` | Ledger, inspector, inputs |
-| `INK` | `#141A17` | Primary text, settled states, filled proof markers |
-| `INK_2` | `#48514C` | Secondary text, hashes in rows |
-| `INK_3` | `#68706B` | Labels and metadata (4.9:1 on white) |
-| `RULE` | `#E1E4E0` | Hairlines |
-| `RULE_STRONG` | `#C8CDC8` | Input and secondary-button borders |
-| `ACCENT` | `#1D5A44` | The only accent: primary button, links, "Ready to finish", "Not minted" on a ready transfer |
+| `SURFACE_2` | `#F7F9F7` | Table header, footer notes, hover wash |
+| `INK` | `#0E1A14` | Primary text, settled states, filled proof markers |
+| `INK_2` | `#3B4841` | Secondary text, hashes in rows |
+| `INK_3` | `#586660` | Labels and metadata (6.0:1 on white, 5.3:1 on the page ground) |
+| `RULE` | `#DCE2DD` | Hairlines |
+| `RULE_STRONG` | `#BDC7C0` | Secondary-button borders and the Testnet tag |
+| `FIELD_BORDER` | `#8A968F` | Input borders (3.1:1 on white) |
+| `ACCENT` | `#0B6B4A` | The only accent: primary button, links, active tab, "Ready to finish", "Not minted" on a ready transfer (6.5:1 on white) |
+| `ACCENT_DEEP` | `#095A3E` | Primary button on hover |
+| `SELECTED` | `#E3F2EA` | The selected ledger row |
 | `AMBER` | `#9A5B0B` | Waiting, restricted, expired, example mode (5.4:1) |
 | `RED` | `#A8332B` | Source receipt changed, errors (6.6:1) |
 
@@ -59,8 +63,8 @@ The rule is that **ink means settled, the accent means you can act here, amber m
 
 ### Shape and surfaces
 
-- Radii vary with hierarchy: 3 for the Testnet tag, 4 for small links, 6 for controls and notices, 8 for the ledger frame. Status dots and proof markers are round.
-- One-pixel hairlines separate things. There are no shadows, gradients, illustrations, emoji or tinted icon chips.
+- Radii vary with hierarchy: 6 for small links and the review panel's inner box, 8 for controls and notices, 12 for the ledger frame and dialogs, and a pill for the Testnet tag. Status dots and proof markers are round.
+- One-pixel hairlines separate things. The header and the ledger frame carry one soft shadow each, and nothing else does. There are no gradients, illustrations, emoji or tinted icon chips. The brand mark is a single accent square.
 - Icons only where they change meaning: back, close, open external receipt, copy, link.
 
 ### Layout

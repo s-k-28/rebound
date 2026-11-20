@@ -17,7 +17,7 @@ For local adapter checks, set `REBOUND_STREAM_SECRET` and send it in `x-rebound-
 
 The receiver stores event candidates in SQLite. Duplicate delivery does not create another recovery action. Canonical source receipt/block, the Circle message, destination nonce and actual caller are independently rechecked before preparation. Reorged or removed candidates cannot authorize a mint.
 
-Use **Search Stream index** in the inbox or `uv run python -m rebound.cli stream-index "$WALLET"` after delivery. This search reads candidates received through the webhook and verifies them with source receipts and destination chain state. It does not run a source `eth_getLogs` history scan. **Authenticated Stream payload** means that the configured token validated the payload and its block hash matched the log. It does not independently prove that QuickNode sent it: the token holder can also create a local signed replay. A burn accepted with the local shared secret is labelled **Stream endpoint (no QuickNode signature)**. Neither authentication method alone completes the provider-observation gate. QuickNode does not report block coverage to Rebound, so an empty result is not proof that no transfer exists.
+Use **Search Stream index** in the inbox or `uv run python -m rebound.cli stream-index "$WALLET"` after delivery. This search reads candidates received through the webhook and verifies them with source receipts and destination chain state. It does not run a source `eth_getLogs` history scan. **Authenticated Stream payload** means that the configured token validated the payload and its block hash matched the log. It does not independently prove that QuickNode sent it: the token holder can also create a local signed replay. A burn accepted with the local shared secret is labelled **Shared-secret adapter payload**. Neither authentication method alone completes the provider-observation gate. QuickNode does not report block coverage to Rebound, so an empty result is not proof that no transfer exists.
 
 The inbox also has a **QuickNode walkthrough** dialog. It fills the walkthrough wallet and separates the recorded signed sample, synthetic examples, authenticated endpoint payloads, wallet-only lookup and completed Arc mint. Independently observed provider delivery remains a separate Pending check until a dashboard delivery record is matched to the endpoint payload and canonical source receipt. The walkthrough wallet defaults to the throwaway testnet wallet in [LIVE-RECOVERY.md](LIVE-RECOVERY.md). Set `REBOUND_QUICKNODE_DEMO_WALLET` to a public address to use another.
 
@@ -43,6 +43,28 @@ The machine-readable copy is [`rebound/stream_record.json`](../rebound/stream_re
 ## Why this Stream
 
 A user who lost their session may have an address and no transaction hash. RPC discovery is bounded to a selected block window and provider retention or query limits. A configured Stream can filter incoming blocks for successful receipts containing a `DepositForBurn` from Circle's TokenMessengerV2 for native Base Sepolia USDC. Rebound can persist those events and later look them up by wallet. Lookup is a database read, followed by independent source receipt, Circle attestation and Arc requests; verification time depends on those providers. The Stream is a discovery feed and never authorizes recovery by itself.
+
+## Showing the integration without a live delivery
+
+The local adapter demonstrates Stream-index discovery. Use a fresh local database for the expected label. Export the same `REBOUND_STREAM_SECRET` in both terminals through your secret manager so it stays out of commands and recordings. The app gives the HMAC token precedence, so unset it for the shared-secret rehearsal.
+
+Start a separate local instance on an available port. This example uses port 8766.
+
+```sh
+env -u REBOUND_STREAM_SECURITY_TOKEN \
+  REBOUND_DB="$(mktemp -d)/rebound.sqlite3" \
+  uv run --locked uvicorn rebound.app:app --host 127.0.0.1 --port 8766
+```
+
+Run the seeding helper from the repository root in the second terminal.
+
+```sh
+uv run --locked python scripts/seed_demo_delivery.py http://127.0.0.1:8766
+```
+
+The helper reads the public receipt for the controlled burn and submits its log to `/api/streams`. Search the Stream index using the public walkthrough wallet. A fresh database shows **Shared-secret adapter payload** in the inspector. The provider-delivery check stays Pending.
+
+Existing authenticated records keep the **Authenticated Stream payload** label after a shared-secret retry. Legacy records without stored receipt time or HMAC evidence appear as **Stream endpoint record**. The helper accepts loopback HTTP and remote HTTPS. The public preview has ingestion disabled.
 
 ## Observed state and how to finish the live check
 
