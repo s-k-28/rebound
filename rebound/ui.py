@@ -15,7 +15,7 @@ from rebound.clients import UpstreamError
 from rebound.examples import EXAMPLE_WALLET, example_stream_transfer, example_transfers
 from rebound.protocol import ZERO, address, hash32
 from rebound.quicknode import (
-    delivered_by_quicknode,
+    authenticated_stream_payload,
     evidence_steps,
     load_stream_record,
     stream_facts,
@@ -210,7 +210,7 @@ def empty_result_message(mode: str, blocks: int, end_block: str = "", *, end_tim
     if mode == "transaction":
         return "No supported burn in this transaction. Use the original Base Sepolia burn transaction hash."
     if mode == "stream":
-        return ("No burns for this address have been delivered to the Stream index by QuickNode. Rebound did not scan "
+        return ("No burns for this address have been delivered to the Stream index on this endpoint. Rebound did not scan "
                 "Base Sepolia history. A transfer outside the Stream's range will not appear here. "
                 "Search by transaction hash or scan history to look further.")
     if end_time:
@@ -717,7 +717,7 @@ class InboxUI:
         if not self.show_transaction and not self.state.example:
             # The QuickNode search sits beside the main lookup, not under History options, so the
             # walkthrough can be followed without hunting for it.
-            options.insert(0, self.link("Find transfers via QuickNode", self.scan_index, icon=ft.Icons.BOLT,
+            options.insert(0, self.link("Search Stream index", self.scan_index, icon=ft.Icons.BOLT,
                                         disabled=busy))
             if callable(getattr(self.service, "stream_status", None)):
                 options.insert(1, self.link("QuickNode walkthrough", self.quicknode_walkthrough, disabled=busy))
@@ -1130,8 +1130,8 @@ class InboxUI:
         if item.get("forward_state"):
             facts.append(self.fact("Circle delivery report", item["forward_state"].title(), mono=False))
         if item.get("discovery_source"):
-            discovery = {"stream": "QuickNode Streams" if delivered_by_quicknode(item)
-                         else "Stream endpoint (no QuickNode signature)",
+            discovery = {"stream": "Authenticated Stream payload" if authenticated_stream_payload(item)
+                         else "Stream endpoint (shared-secret adapter)",
                          "example_stream": "Simulated Stream delivery", "rpc": "Source RPC history",
                          "receipt": "Base Sepolia receipt"}[item["discovery_source"]]
             facts.append(self.fact("Discovered via", discovery, mono=False))
@@ -1160,18 +1160,11 @@ class InboxUI:
                       vertical_alignment=ft.CrossAxisAlignment.START)
 
     def quicknode_evidence(self, item):
-        """Burn confirmed, delivered by QuickNode, transfer status verified, each tied to this transfer."""
+        """Compact endpoint evidence; the existing proof below owns the chain checks."""
         steps = evidence_steps(item, state_copy(item["status"])[0])
         if not steps:
             return None
-        simulated = item.get("discovery_source") == "example_stream"
-        confirmed = delivered_by_quicknode(item)
-        heading = ("Simulated Stream delivery" if simulated else "Discovered via QuickNode Streams" if confirmed
-                   else "Stream endpoint test (no QuickNode signature)")
-        flow = [self.evidence_row(step) for step in steps]
-        controls = [self.section_title("QuickNode evidence"),
-                    self.text(heading, 13, ACCENT if confirmed else AMBER, ft.FontWeight.W_600), *flow]
-        return ft.Column(controls, spacing=12)
+        return ft.Column([self.section_title("Stream discovery"), self.evidence_row(steps[1])], spacing=8)
 
     async def quicknode_walkthrough(self, _=None) -> None:
         settings = getattr(self.service, "settings", None)
@@ -1183,6 +1176,7 @@ class InboxUI:
         except Exception as exc:
             self.page.show_dialog(self.dialog("QuickNode walkthrough", [self.text(safe_error(exc), 13, INK_2)]))
             return
+        wallet = status["wallet"]
         searched = self.state.transfers if (self.state.mode == "stream" and self.state.wallet == wallet
                                             and not self.state.example) else []
         checks = walkthrough_checks(enabled=status["enabled"], delivered=status["delivered"],
@@ -1199,8 +1193,8 @@ class InboxUI:
                                      self.text(step.detail, 12.5, INK_2, expand=True)], spacing=8,
                                     vertical_alignment=ft.CrossAxisAlignment.START)) for step in checks]
         self.page.show_dialog(self.dialog("QuickNode walkthrough", [
-            self.text("Enter only a public wallet address. Rebound finds the transfer from burns QuickNode Streams "
-                      "delivered, then rechecks it on chain.", 13, INK_2),
+            self.text("Enter only a public wallet address. Rebound searches the Stream endpoint index, then checks "
+                      "the source and destination evidence. Endpoint authentication and actual provider delivery are separate.", 13, INK_2),
             ft.Column([self.text("Walkthrough wallet (testnet, public)", 12, INK_3),
                        self.text(wallet, 12.5, INK, mono=True, selectable=True)], spacing=2),
             self.button("Use this wallet", use_wallet, primary=True, icon=ft.Icons.WALLET),
