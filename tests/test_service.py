@@ -19,6 +19,9 @@ def setup_service(tmp_path):
         if request.url.host == "circle.test":
             if state["circle_status"] != 200:
                 return httpx.Response(state["circle_status"], json={"error": "pending"})
+            if request.url.path == "/v2/burn/USDC/fees/6/26":
+                state["fee_checks"] = state.get("fee_checks", 0) + 1
+                return httpx.Response(200, json=state.get("fees", [{"finalityThreshold": 2000, "minimumFee": 0}]))
             return httpx.Response(200, json={"sourceTxHash": state.get("source_hash", "0x" + "cd" * 32),
                 "messages": state.get("messages", [{"status": "complete", "message": state["message"],
                               "attestation": "0x" + "11" * 65}])})

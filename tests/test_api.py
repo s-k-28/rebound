@@ -5,6 +5,31 @@ from tests.test_protocol import WALLET
 pytest_plugins = ["tests.test_service"]
 
 
+async def test_readiness_reports_individual_providers_and_caches_recent_checks(setup_service):
+    from rebound.app import create_app
+
+    service, state = setup_service
+    app = create_app(service, include_ui=False)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        assert (await client.get("/api/health")).status_code == 200
+        first = await client.get("/api/ready")
+        assert first.status_code == 200
+        assert first.json()["providers"] == {"base_sepolia": "ok", "circle_cctp_fee_route": "ok", "arc_testnet": "ok"}
+        assert (await client.get("/api/ready")).json() == first.json()
+        assert state["fee_checks"] == 1
+
+        state["arc_chain"] = 1
+        state["fees"] = []
+        service._readiness_expires = 0
+        next_check = await client.get("/api/ready")
+        assert next_check.status_code == 503
+        assert next_check.json()["providers"] == {
+            "base_sepolia": "ok", "circle_cctp_fee_route": "unavailable", "arc_testnet": "unavailable",
+        }
+        assert next_check.headers["cache-control"] == "no-store"
+        assert (await client.get("/api/health")).status_code == 200
+
+
 async def test_invalid_scan_is_rejected_before_any_upstream_work(setup_service):
     from rebound.app import create_app
     service, _ = setup_service

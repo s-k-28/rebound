@@ -14,6 +14,7 @@ from typing import Annotated
 import flet.fastapi as flet_fastapi
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from rebound.service import RecoveryService, Settings, UpstreamError
@@ -68,10 +69,16 @@ def create_app(recovery: RecoveryService | None = None, *, include_ui: bool = Tr
                 "signing": "local CLI only", "upstreams": "not checked by this endpoint",
                 "stream_enabled": recovery.settings.stream_enabled}
 
-    async def checked(awaitable):
+    @api.get("/api/ready")
+    async def ready():
+        report = await recovery.readiness()
+        return JSONResponse(report, status_code=200 if report["status"] == "ready" else 503,
+                            headers={"Cache-Control": "no-store"})
+
+    async def checked(operation, *args, **kwargs):
         try:
-            async with slots, asyncio.timeout(120):
-                return await awaitable
+            async with asyncio.timeout(120), slots:
+                return await operation(*args, **kwargs)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except UpstreamError as exc:
@@ -83,23 +90,23 @@ def create_app(recovery: RecoveryService | None = None, *, include_ui: bool = Tr
     async def scan(wallet: Annotated[str, Query(pattern=WALLET_PATTERN)],
                    blocks: Annotated[int, Query(ge=1, le=50000)] = 2000,
                    end_block: Annotated[int | None, Query(ge=0)] = None):
-        return await checked(recovery.scan(wallet, blocks=blocks, end_block=end_block))
+        return await checked(recovery.scan, wallet, blocks=blocks, end_block=end_block)
 
     @api.post("/api/prepare")
     async def prepare(payload: PrepareRequest):
-        return await checked(recovery.prepare(payload.tx_hash, payload.log_index, payload.caller))
+        return await checked(recovery.prepare, payload.tx_hash, payload.log_index, payload.caller)
 
     @api.get("/api/stream-index")
     async def stream_index(wallet: Annotated[str, Query(pattern=WALLET_PATTERN)]):
-        return await checked(recovery.scan_stream(wallet))
+        return await checked(recovery.scan_stream, wallet)
 
     @api.get("/api/transactions/{tx_hash}")
     async def transaction(tx_hash: str, log_index: Annotated[int | None, Query(ge=0)] = None):
-        return await checked(recovery.inspect_transaction(tx_hash, log_index=log_index))
+        return await checked(recovery.inspect_transaction, tx_hash, log_index=log_index)
 
     @api.get("/api/transactions/{tx_hash}/replay")
     async def replay(tx_hash: str, log_index: Annotated[int, Query(ge=0)]):
-        return await checked(recovery.replay_mint(tx_hash, log_index))
+        return await checked(recovery.replay_mint, tx_hash, log_index)
 
     @api.post("/api/streams")
     async def stream(request: Request, x_rebound_secret: Annotated[str | None, Header()] = None):

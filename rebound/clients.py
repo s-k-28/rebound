@@ -90,6 +90,20 @@ class Circle:
             raise UpstreamError("Circle returned an unreadable transfer status. Refresh later.")
         return data
 
+    async def check_route(self) -> None:
+        try:
+            response = await self.client.get(f"{self.url}/v2/burn/USDC/fees/6/26", timeout=6)
+            response.raise_for_status()
+            fees = response.json()
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            raise UpstreamError("Circle's Base Sepolia to Arc fee route is unavailable.") from exc
+        if not isinstance(fees, list) or not any(
+            isinstance(row, dict) and row.get("finalityThreshold") == 2000
+            and type(row.get("minimumFee")) in (int, float) and 0 <= row["minimumFee"] <= 10_000
+            for row in fees
+        ):
+            raise UpstreamError("Circle returned an unreadable fee route.")
+
 
 def quantity(value, label: str = "RPC") -> int:
     if not isinstance(value, str) or not value.startswith("0x"):

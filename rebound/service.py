@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from urllib.parse import urlsplit
@@ -129,6 +130,9 @@ class RecoveryService:
         self._scan_slots = asyncio.Semaphore(2)
         self._read_slots = asyncio.Semaphore(3)
         self._log_chunk_size = 1000
+        self._readiness_lock = asyncio.Lock()
+        self._readiness_cache: dict | None = None
+        self._readiness_expires = 0.0
 
     async def _verify_chain(self, rpc: Rpc, chain: int, contract: str):
         chain_id, code = await asyncio.gather(
@@ -142,6 +146,34 @@ class RecoveryService:
             raise UpstreamError(f"{rpc.label} could not verify the required contract.") from exc
         if not present:
             raise UpstreamError(f"{rpc.label} has no deployed contract at the required address.")
+
+    async def readiness(self) -> dict:
+        async def probe(check) -> str:
+            try:
+                async with asyncio.timeout(7):
+                    await check
+            except (UpstreamError, TimeoutError):
+                return "unavailable"
+            return "ok"
+
+        async with self._readiness_lock:
+            if self._readiness_cache is not None and time.monotonic() < self._readiness_expires:
+                return self._readiness_cache
+            base, circle, arc = await _gather_reads(
+                probe(self._verify_chain(self.base, 84532, p.MESSENGER)),
+                probe(self.circle.check_route()),
+                probe(self._verify_chain(self.arc, 5042002, p.TRANSMITTER)),
+            )
+            providers = {"base_sepolia": base, "circle_cctp_fee_route": circle, "arc_testnet": arc}
+            ready = all(status == "ok" for status in providers.values())
+            self._readiness_cache = {
+                "status": "ready" if ready else "degraded",
+                "providers": providers,
+                "checked_at": datetime.now(UTC).isoformat(timespec="seconds"),
+                "stream_ingestion_configured": self.settings.stream_enabled,
+            }
+            self._readiness_expires = time.monotonic() + (30 if ready else 5)
+            return self._readiness_cache
 
     def ingest_logs(self, logs: list[dict]) -> int:
         if not isinstance(logs, list) or len(logs) > 5000:
