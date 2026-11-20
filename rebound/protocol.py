@@ -222,7 +222,9 @@ def validate_match(burn: Burn, message: Message, *, inspect_forwarding: bool = F
 def classify(message: Message, *, nonce_used: bool, destination_block: int, caller: str | None = None) -> str:
     if nonce_used:
         return "completed"
-    if message.expires_at and destination_block >= message.expires_at:
+    # TokenMessengerV2 requires expirationBlock > block.number, and a new delivery
+    # executes no earlier than the block after the observed destination head.
+    if message.expires_at and destination_block + 1 >= message.expires_at:
         return "expired"
     if message.caller != ZERO and (caller is None or address(caller) != message.caller):
         return "caller_required"
