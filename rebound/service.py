@@ -291,8 +291,20 @@ class RecoveryService:
 
         return await _gather_reads(*(inspect(candidate) for candidate in burns[:100]))
 
-    async def inspect_transaction(self, tx_hash: str, *, log_index: int | None = None) -> dict:
+    async def inspect_transaction(self, tx_hash: str, *, log_index: int | None = None,
+                                  destination_hash: str | None = None) -> dict:
+        """Inspect source events and optionally verify one submitted Arc receipt.
+
+        Submitted evidence is separate from Circle/local receipt discovery. It is
+        never saved and cannot change the transfer's independently checked state.
+        """
         tx_hash = p.hash32(tx_hash)
+        if log_index is not None and (type(log_index) is not int or log_index < 0):
+            raise ValueError("log_index must identify one non-negative source event index.")
+        if destination_hash is not None:
+            if log_index is None:
+                raise ValueError("destination_hash requires an explicit log_index for the source event.")
+            destination_hash = p.hash32(destination_hash)
         async with self._admit():
             await self._verify_chain(self.base, 84532, p.MESSENGER)
             receipt_burns = await self._receipt_burns(tx_hash)
@@ -303,7 +315,8 @@ class RecoveryService:
 
             async def inspect(burn: p.Burn) -> dict:
                 async with self._read_slots:
-                    row = await self.diagnose(burn, source_head=latest, receipt_burns=receipt_burns)
+                    row = await self.diagnose(burn, source_head=latest, receipt_burns=receipt_burns,
+                                              destination_hash=destination_hash)
                     row["discovery_source"] = "receipt"
                     return row
 
@@ -519,7 +532,8 @@ class RecoveryService:
                     "receive_simulated": True}
 
     async def diagnose(self, burn: p.Burn, *, source_head: int | None = None, caller: str | None = None,
-                       receipt_burns: list[p.Burn] | None = None) -> dict:
+                       receipt_burns: list[p.Burn] | None = None,
+                       destination_hash: str | None = None) -> dict:
         row = {
             "key": burn.key, "tx_hash": burn.tx_hash, "log_index": burn.log_index,
             "block_number": burn.block_number, "amount": p.usdc(burn.amount),
@@ -532,6 +546,9 @@ class RecoveryService:
             "destination_block": None, "nonce_used": None, "expiration_block": None,
             "delivery_mode": None, "forward_state": None,
         }
+        if destination_hash is not None:
+            row.update(submitted_destination_hash=destination_hash,
+                       submitted_receipt_verified=False, submitted_receipt_url=None)
         try:
             if receipt_burns is None:
                 await self._receipt_burn(burn.tx_hash, burn.log_index, burn)
@@ -563,6 +580,13 @@ class RecoveryService:
                     receipt = await self._verified_arc_receipt(burn, attested)
                     if receipt is not None:
                         row["destination_url"] = f"{p.ARC_EXPLORER}/tx/{p.hash32(receipt['transactionHash'])}"
+                    if destination_hash is not None:
+                        submitted = receipt
+                        if receipt is None or p.hash32(receipt["transactionHash"]) != destination_hash:
+                            submitted = await self._matching_arc_receipt(destination_hash, attested)
+                        if submitted is not None:
+                            row.update(submitted_receipt_verified=True,
+                                       submitted_receipt_url=f"{p.ARC_EXPLORER}/tx/{destination_hash}")
                 elif delivery_mode:
                     status = "managed_delivery"
                 elif status == "ready" and source_confirming:

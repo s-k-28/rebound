@@ -216,6 +216,128 @@ async def test_completed_links_only_to_a_matching_arc_receipt(setup_service, rec
     assert row["destination_url"] == (f"https://explorer.testnet.arc.io/tx/{tx_hash}" if receipt_variant == "matching" else None)
 
 
+@pytest.fixture
+def submitted_arc_receipt(setup_service):
+    """A real-shaped destination receipt for a message not yet linked by Circle."""
+    from rebound import protocol as p
+    from tests.test_protocol import word_address
+
+    app, state = setup_service
+    state["used"] = True
+    tx_hash, block_hash = "0x" + "ae" * 32, "0x" + "bc" * 32
+    raw = message_hex()
+    receipt = {
+        "status": "0x1", "transactionHash": tx_hash, "transactionIndex": "0x0",
+        "blockNumber": "0x2bc", "blockHash": block_hash,
+        "logs": [{
+            "address": p.TRANSMITTER, "transactionHash": tx_hash, "transactionIndex": "0x0",
+            "blockNumber": "0x2bc", "blockHash": block_hash,
+            "topics": [p.RECEIVED_TOPIC, "0x" + word_address(WALLET).hex(),
+                       "0x" + "ab" * 32, "0x" + (2000).to_bytes(32, "big").hex()],
+            "data": "0x" + encode(["uint32", "bytes32", "bytes"],
+                                    [6, word_address(p.MESSENGER), bytes.fromhex(raw[2:])[148:]]).hex(),
+        }],
+    }
+    destination = {"receipts": {tx_hash: receipt}, "block": {
+        "hash": block_hash, "number": "0x2bc", "transactions": [tx_hash],
+    }, "unavailable": False}
+    original = app.arc.call
+
+    async def arc_call(method, params=None):
+        if method == "eth_getTransactionReceipt":
+            if destination["unavailable"]:
+                raise UpstreamError("Arc receipt is temporarily unavailable.")
+            return destination["receipts"].get(params[0])
+        if method == "eth_getBlockByNumber":
+            assert params == ["0x2bc", False]
+            return destination["block"]
+        return await original(method, params)
+
+    app.arc.call = arc_call
+    return app, state, tx_hash, receipt, destination
+
+
+async def test_submitted_receipt_is_verified_without_a_circle_hint_or_database_write(submitted_arc_receipt):
+    from rebound import protocol as p
+
+    app, _, tx_hash, _, _ = submitted_arc_receipt
+    result = await app.inspect_transaction("0x" + "cd" * 32, log_index=3,
+        destination_hash=tx_hash.upper().replace("0X", "0x"))
+    row, = result["transfers"]
+    assert row["status"] == "completed" and row["nonce_used"] is True
+    assert row["submitted_destination_hash"] == tx_hash
+    assert row["submitted_receipt_verified"] is True
+    assert row["submitted_receipt_url"] == f"https://explorer.testnet.arc.io/tx/{tx_hash}"
+    assert row["destination_url"] is None  # Keep the independently established receipt separate.
+    assert app.store.local_mint(p.decode_burn(burn_log()), "0x" + "ab" * 32) is None
+    assert app.store.candidates(WALLET) == []
+
+
+@pytest.mark.parametrize("failure", ["wrong_nonce", "reorg", "unavailable", "reverted", "missing"])
+async def test_bad_submitted_hint_does_not_change_consumed_nonce_truth(submitted_arc_receipt, failure):
+    app, _, tx_hash, receipt, destination = submitted_arc_receipt
+    if failure == "wrong_nonce":
+        receipt["logs"][0]["topics"][2] = "0x" + "ff" * 32
+    elif failure == "reorg":
+        destination["block"]["hash"] = "0x" + "ff" * 32
+    elif failure == "unavailable":
+        destination["unavailable"] = True
+    elif failure == "reverted":
+        receipt["status"] = "0x0"
+    else:
+        destination["receipts"] = {}
+    row, = (await app.inspect_transaction("0x" + "cd" * 32, log_index=3,
+                                        destination_hash=tx_hash))["transfers"]
+    assert row["status"] == "completed" and row["nonce_used"] is True
+    assert row["submitted_receipt_verified"] is False and row["submitted_receipt_url"] is None
+    assert row["destination_url"] is None
+
+
+async def test_submitted_receipt_cannot_verify_an_unused_current_nonce(submitted_arc_receipt):
+    app, state, tx_hash, _, _ = submitted_arc_receipt
+    state["used"] = False
+    row, = (await app.inspect_transaction("0x" + "cd" * 32, log_index=3,
+                                        destination_hash=tx_hash))["transfers"]
+    assert row["status"] == "ready" and row["nonce_used"] is False
+    assert row["submitted_receipt_verified"] is False and row["submitted_receipt_url"] is None
+
+
+async def test_bad_submitted_hash_does_not_overwrite_an_authentic_circle_receipt(submitted_arc_receipt):
+    app, state, good_hash, _, _ = submitted_arc_receipt
+    state["messages"] = [{"status": "complete", "message": message_hex(),
+                          "attestation": "0x" + "11" * 65, "destinationMintTxHash": good_hash}]
+    bad_hash = "0x" + "fe" * 32
+    row, = (await app.inspect_transaction("0x" + "cd" * 32, log_index=3,
+                                        destination_hash=bad_hash))["transfers"]
+    assert row["submitted_destination_hash"] == bad_hash
+    assert row["submitted_receipt_verified"] is False and row["submitted_receipt_url"] is None
+    assert row["destination_url"] == f"https://explorer.testnet.arc.io/tx/{good_hash}"
+
+
+async def test_submitted_receipt_requires_source_and_matching_attestation(submitted_arc_receipt):
+    app, state, tx_hash, _, _ = submitted_arc_receipt
+    state["circle_status"] = 404
+    row, = (await app.inspect_transaction("0x" + "cd" * 32, log_index=3,
+                                        destination_hash=tx_hash))["transfers"]
+    assert row["status"] == "awaiting_attestation" and row["submitted_receipt_verified"] is False
+    state["circle_status"] = 200
+    state["logs"].append(burn_log() | {"logIndex": "0x4"})
+    row, = (await app.inspect_transaction("0x" + "cd" * 32, log_index=3,
+                                        destination_hash=tx_hash))["transfers"]
+    assert row["status"] == "unsupported" and row["submitted_receipt_verified"] is False
+    state["canonical"] = False
+    with pytest.raises(ValueError, match="canonical"):
+        await app.inspect_transaction("0x" + "cd" * 32, log_index=3, destination_hash=tx_hash)
+
+
+@pytest.mark.parametrize("index", [None, -1, True])
+async def test_submitted_receipt_requires_one_explicit_nonnegative_event_index(setup_service, index):
+    app, _ = setup_service
+    with pytest.raises(ValueError, match="log_index"):
+        await app.inspect_transaction("0x" + "cd" * 32, log_index=index,
+                                      destination_hash="0x" + "ae" * 32)
+
+
 async def test_unrelated_wallet_is_not_attributed_a_transfer(setup_service):
     app, _ = setup_service
     assert (await app.scan(OTHER, blocks=150))["transfers"] == []

@@ -116,6 +116,39 @@ async def test_transaction_lookup_reuses_canonical_receipt_without_a_history_sca
         assert "canonical block" in result.json()["detail"]
 
 
+async def test_transaction_api_verifies_a_submitted_arc_hash_for_the_exact_source_event(submitted_arc_receipt):
+    from rebound.app import create_app
+
+    recovery, _, arc_hash, _, _ = submitted_arc_receipt
+    app = create_app(recovery, include_ui=False)
+    url = "/api/transactions/0x" + "cd" * 32
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(url, params={"log_index": 3, "destination_hash": arc_hash})
+        mismatch = await client.get(url, params={"log_index": 3, "destination_hash": "0x" + "fe" * 32})
+    assert response.status_code == 200
+    row, = response.json()["transfers"]
+    assert row["submitted_receipt_verified"] is True
+    assert row["submitted_receipt_url"] == f"https://explorer.testnet.arc.io/tx/{arc_hash}"
+    assert row["destination_url"] is None
+    wrong_row, = mismatch.json()["transfers"]
+    assert mismatch.status_code == 200 and wrong_row["status"] == "completed"
+    assert wrong_row["submitted_receipt_verified"] is False and wrong_row["submitted_receipt_url"] is None
+
+
+async def test_submitted_arc_hash_query_requires_exact_index_and_valid_hash(setup_service):
+    from rebound.app import create_app
+
+    recovery, _ = setup_service
+    app = create_app(recovery, include_ui=False)
+    url = "/api/transactions/0x" + "cd" * 32
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        missing_index = await client.get(url, params={"destination_hash": "0x" + "ae" * 32})
+        assert missing_index.status_code == 400
+        assert "log_index" in missing_index.json()["detail"]
+        invalid_hash = await client.get(url, params={"log_index": 3, "destination_hash": "0x1234"})
+        assert invalid_hash.status_code == 422
+
+
 async def test_authenticated_stream_envelopes_are_candidates_only(setup_service):
     from dataclasses import replace
 
