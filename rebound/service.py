@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -15,6 +16,18 @@ from rebound.clients import Circle, RangeLimitError, Rpc, UpstreamError, quantit
 from rebound.store import CandidateStore, IndexedBurn
 
 MIN_RECOVERY_CONFIRMATIONS = 12
+TIME_SEARCH_TIMEOUT_SECONDS = 30
+
+
+def _parse_utc_cutoff(value: str) -> tuple[int, str]:
+    if (not isinstance(value, str) or len(value) > 20 or not re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}(?: [0-9]{2}:[0-9]{2}|T[0-9]{2}:[0-9]{2}(?::[0-9]{2})?Z?)", value)):
+        raise ValueError("Use a UTC cutoff as YYYY-MM-DD HH:MM or YYYY-MM-DDTHH:MM[:SS][Z].")
+    try:
+        cutoff = datetime.fromisoformat(value.removesuffix("Z")).replace(tzinfo=UTC)
+    except ValueError:
+        raise ValueError("The UTC cutoff is not a valid date and time.") from None
+    return int(cutoff.timestamp()), cutoff.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 @dataclass(frozen=True)
@@ -254,19 +267,95 @@ class RecoveryService:
         self.store.save_many(candidates, from_stream=True)
         return len(candidates)
 
-    async def scan(self, wallet: str, blocks: int = 2000, *, end_block: int | None = None) -> dict:
+    async def _block_at_time(self, timestamp: int, latest: int) -> tuple[int, int]:
+        """Return the last block at the cutoff and this provider's readable floor."""
+        if not 0 <= latest < 2**64:
+            raise UpstreamError("Base Sepolia returned an invalid source head for time lookup.")
+        seen: dict[int, tuple[int, str]] = {}
+
+        async def header(tag: str, expected: int | None = None) -> tuple[int, int]:
+            try:
+                async with self._read_slots:
+                    block = await self.base.call("eth_getBlockByNumber", [tag, False])
+                if not isinstance(block, dict):
+                    raise ValueError
+                for field in ("number", "timestamp"):
+                    if (not isinstance(block.get(field), str) or len(block[field]) > 18
+                            or not re.fullmatch(r"0x(?:0|[1-9a-fA-F][0-9a-fA-F]{0,15})", block[field])):
+                        raise ValueError
+                number, seconds = quantity(block["number"]), quantity(block["timestamp"])
+                block_hash = p.hash32(block.get("hash"))
+                if (number > latest or (expected is not None and number != expected)
+                        or seconds > 253_402_300_799):
+                    raise ValueError
+                identity = (seconds, block_hash)
+                if number in seen and seen[number] != identity:
+                    raise ValueError
+                seen[number] = identity
+                return number, seconds
+            except (ValueError, TypeError, UpstreamError) as exc:
+                raise UpstreamError("Base Sepolia could not verify the requested time range. Its available source history may be limited; try another RPC or a more recent UTC cutoff.") from exc
+
+        _, head_time = await header(hex(latest), latest)
+        # 'earliest' is the readable retention floor on pruned RPCs, not always genesis.
+        floor, floor_time = await header("earliest")
+        if floor_time > head_time:
+            raise UpstreamError("Base Sepolia returned inconsistent block timestamps.")
+        if timestamp < floor_time:
+            first = datetime.fromtimestamp(floor_time, UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+            raise ValueError(f"The cutoff is before available source history, which starts at {first} (block {floor:,}).")
+        low, high, low_time, high_time = floor, latest, floor_time, head_time
+        if timestamp >= head_time:
+            low = latest
+        else:
+            # Upper-bound search: equal timestamps always move right, including every tie.
+            for _ in range(64):
+                if high - low <= 1:
+                    break
+                middle = (low + high) // 2
+                _, middle_time = await header(hex(middle), middle)
+                if not low_time <= middle_time <= high_time:
+                    raise UpstreamError("Base Sepolia returned inconsistent block timestamps.")
+                if middle_time <= timestamp:
+                    low, low_time = middle, middle_time
+                else:
+                    high, high_time = middle, middle_time
+            if high - low > 1:
+                raise UpstreamError("Base Sepolia time lookup exceeded its bounded search.")
+        # Re-read the final bracket so a changed boundary cannot silently move the cutoff.
+        _, selected_time = await header(hex(low), low)
+        if selected_time > timestamp:
+            raise UpstreamError("Base Sepolia could not establish the UTC cutoff.")
+        if low < latest:
+            _, following_time = await header(hex(low + 1), low + 1)
+            if following_time <= timestamp:
+                raise UpstreamError("Base Sepolia could not establish the latest block at the UTC cutoff.")
+        return low, floor
+
+    async def scan(self, wallet: str, blocks: int = 2000, *, end_block: int | None = None,
+                   end_time: str | None = None) -> dict:
         wallet = p.address(wallet)
         if not isinstance(blocks, int) or isinstance(blocks, bool) or not 1 <= blocks <= 50_000:
             raise ValueError("History must contain between 1 and 50,000 source blocks.")
         if end_block is not None and (type(end_block) is not int or end_block < 0):
             raise ValueError("End block must be a non-negative block number.")
+        if end_block is not None and end_time is not None:
+            raise ValueError("Choose either an end block or a UTC end time, not both.")
+        cutoff = _parse_utc_cutoff(end_time) if end_time is not None else None
         async with self._admit():
             await self._verify_chain(self.base, 84532, p.MESSENGER)
             latest = quantity(await self.base.call("eth_blockNumber"))
             if end_block is not None and end_block > latest:
                 raise ValueError(f"End block must be at or before Base Sepolia block {latest:,}.")
             end = latest if end_block is None else end_block
-            start = max(0, end - blocks + 1)
+            floor = 0
+            if cutoff is not None:
+                try:
+                    async with asyncio.timeout(TIME_SEARCH_TIMEOUT_SECONDS):
+                        end, floor = await self._block_at_time(cutoff[0], latest)
+                except TimeoutError as exc:
+                    raise UpstreamError("Base Sepolia UTC time lookup timed out. Try again or use an end block.") from exc
+            start = max(floor, end - blocks + 1)
             source_token = "0x" + "00" * 12 + p.USDC[2:]
 
             async def read_chunk(first: int, last: int):
@@ -302,13 +391,18 @@ class RecoveryService:
             size = self._log_chunk_size
             batches = await _gather_reads(*(read_chunk(first, min(first + size - 1, end)) for first in range(start, end + 1, size)))
             await asyncio.to_thread(self.store.save_many, [entry for batch in batches for entry in batch])
-            burns = self.store.candidates(wallet, block_range=(start, end) if end_block is not None else None)
+            fixed = end_block is not None or cutoff is not None
+            burns = self.store.candidates(wallet, block_range=(start, end) if fixed else None)
             transfers = await self._inspect_candidates(burns, latest)
-            indexed = ", plus previously indexed candidates" if end_block is None else " (fixed range)"
+            indexed = " (fixed range)" if fixed else ", plus previously indexed candidates"
+            shortened = cutoff is not None and start > max(0, end - blocks + 1)
+            cutoff_note = f" UTC cutoff {cutoff[1]} (latest block at or before)." if cutoff else ""
+            if shortened:
+                cutoff_note += " Range shortened to the provider's available source history."
             return {
                 "wallet": wallet, "from_block": start, "to_block": end,
-                "coverage": f"Base Sepolia blocks {start:,}–{end:,}{indexed}. Covers native USDC CCTP V2 burns to Arc.",
-                "partial": len(burns) > 100, "transfers": transfers,
+                "coverage": f"Base Sepolia blocks {start:,}–{end:,}{indexed}. Covers native USDC CCTP V2 burns to Arc.{cutoff_note}",
+                "partial": len(burns) > 100 or shortened, "transfers": transfers,
             }
 
     async def scan_stream(self, wallet: str) -> dict:
