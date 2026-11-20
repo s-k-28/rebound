@@ -67,7 +67,15 @@ The private key is never accepted by a web endpoint, written to a file or printe
 Run the CLI and inbox with the same `REBOUND_DB` to see a locally recovered receipt before Circle indexes its destination hash. The CLI saves the verified destination hash and the inbox checks the receipt against the current signed message before linking to it.
 
 The unsigned review shows the caller’s Arc balance and gas budget separately from the CCTP protocol fee. Arc gas uses the native USDC balance in 18-decimal units. The CLI checks the caller’s pending balance before asking for a key and checks it again before signing. [Arc wallet integration guide](https://community.arc.io/public/externals/supporting-arc-in-wallets-one-balance-usdc-fees-and-complete-history-2026-09-10)
+## QuickNode Streams integration
 
+Rebound uses QuickNode Streams to help users find interrupted USDC transfers with just a public wallet address. An active Stream monitors Base Sepolia for Circle CCTP V2 USDC burn events and sends matching events to Rebound’s authenticated webhook.
+
+When a user selects **Search Stream index**, Rebound looks up events associated with their wallet and checks the original burn receipt, Circle’s attestation, and Arc’s on-chain state. The user can see whether the transfer is pending, ready to finish, or already complete without looking up the original transaction hash.
+
+**Validation status.** The Base Sepolia Stream is active, and QuickNode’s signed sample delivery passed. End-to-end discovery of a live Base Sepolia → Arc Testnet burn through the Stream index is pending.
+
+See the [QuickNode setup guide](docs/QUICKNODE.md) for configuration and verification steps.
 ## What the states mean
 
 | State | Meaning and next step |
