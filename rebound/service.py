@@ -22,7 +22,10 @@ TIME_SEARCH_TIMEOUT_SECONDS = 30
 
 def _parse_utc_cutoff(value: str) -> tuple[int, str]:
     if (not isinstance(value, str) or len(value) > 20 or not re.fullmatch(
-            r"[0-9]{4}-[0-9]{2}-[0-9]{2}(?: [0-9]{2}:[0-9]{2}|T[0-9]{2}:[0-9]{2}(?::[0-9]{2})?Z?)", value)):
+            # The hour is limited to 00-23 here. Python 3.14's fromisoformat reads 24:00 as midnight
+            # of the next day, which would silently move the cutoff by a day.
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}(?: (?:[01][0-9]|2[0-3]):[0-9]{2}"
+            r"|T(?:[01][0-9]|2[0-3]):[0-9]{2}(?::[0-9]{2})?Z?)", value)):
         raise ValueError("Use a UTC cutoff as YYYY-MM-DD HH:MM or YYYY-MM-DDTHH:MM[:SS][Z].")
     try:
         cutoff = datetime.fromisoformat(value.removesuffix("Z")).replace(tzinfo=UTC)
