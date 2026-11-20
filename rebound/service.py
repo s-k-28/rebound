@@ -123,8 +123,13 @@ def _remember_block_time(times: dict[str, int] | None, block: dict) -> None:
     if times is None:
         return
     try:
-        times[p.hash32(block.get("hash"))] = quantity(block.get("timestamp"))
-    except (ValueError, UpstreamError):
+        block_hash = p.hash32(block.get("hash"))
+        timestamp = quantity(block.get("timestamp"))
+        # This optional display value must be representable on this platform.
+        # Invalid metadata must never change a transfer's proof or control state.
+        datetime.fromtimestamp(timestamp, UTC)
+        times[block_hash] = timestamp
+    except (ValueError, OverflowError, OSError, UpstreamError):
         return
     while len(times) > BLOCK_TIME_CACHE_SIZE:
         times.pop(next(iter(times)))
@@ -503,7 +508,10 @@ class RecoveryService:
         timestamp = self._block_times.get(block_hash)
         if timestamp is None:
             return None
-        return datetime.fromtimestamp(timestamp, UTC).isoformat(timespec="seconds")
+        try:
+            return datetime.fromtimestamp(timestamp, UTC).isoformat(timespec="seconds")
+        except (ValueError, OverflowError, OSError):
+            return None
 
     async def _verified_arc_receipt(self, burn: p.Burn, attestation: Attestation) -> dict | None:
         hint = attestation.receipt_hint

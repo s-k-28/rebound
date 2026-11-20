@@ -446,6 +446,40 @@ async def test_waiting_burn_has_a_time_but_no_mint_time(setup_service):
     assert (row["burned_at"], row["minted_at"]) == ("2026-11-20T06:43:33+00:00", None)
 
 
+@pytest.mark.parametrize("timestamp", [253_402_300_800, 2**64])
+async def test_out_of_range_source_time_cannot_change_verified_recovery_status(setup_service, timestamp):
+    app, _ = setup_service
+    with_base_block_time(app, hex(timestamp))
+    row, = (await app.scan(WALLET, blocks=150))["transfers"]
+    assert row["status"] == "ready"
+    assert row["source_verified"] is True and row["attestation_matched"] is True
+    assert row["burned_at"] is None and row["minted_at"] is None
+    assert app._block_times == {}
+
+
+@pytest.mark.parametrize("timestamp", [253_402_300_800, 2**64])
+async def test_out_of_range_arc_time_cannot_change_verified_delivery(submitted_arc_receipt, timestamp):
+    app, state, tx_hash, _, destination = submitted_arc_receipt
+    state["messages"] = [{"status": "complete", "message": message_hex(),
+                          "attestation": "0x" + "11" * 65, "destinationMintTxHash": tx_hash}]
+    with_base_block_time(app)
+    destination["block"]["timestamp"] = hex(timestamp)
+    row, = (await app.inspect_transaction("0x" + "cd" * 32, log_index=3))["transfers"]
+    assert row["status"] == "completed" and row["nonce_used"] is True
+    assert row["source_verified"] is True and row["attestation_matched"] is True
+    assert row["destination_url"] == f"https://explorer.testnet.arc.io/tx/{tx_hash}"
+    assert row["burned_at"] == "2026-11-20T06:43:33+00:00" and row["minted_at"] is None
+    assert destination["block"]["hash"] not in app._block_times
+
+
+@pytest.mark.parametrize("timestamp", [253_402_300_800, 2**64])
+def test_cached_unrepresentable_time_remains_optional(setup_service, timestamp):
+    app, _ = setup_service
+    block_hash = "0x" + "ef" * 32
+    app._block_times[block_hash] = timestamp
+    assert app._block_time(block_hash) is None
+
+
 async def test_missing_or_reorged_block_time_is_never_filled_in(setup_service):
     app, state = setup_service
     row, = (await app.scan(WALLET, blocks=150))["transfers"]
