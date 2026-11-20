@@ -215,7 +215,7 @@ class RecoveryService:
                 raise
             raise SourceChanged("The source receipt could not be matched safely.") from exc
 
-    async def _matched_attestation(self, burn: p.Burn) -> tuple[p.Message, str, str] | None:
+    async def _matched_attestation(self, burn: p.Burn) -> tuple[p.Message, str, str, str | None] | None:
         response = await self.circle.messages(burn.tx_hash)
         rows = response["messages"]
         if not rows:
@@ -235,7 +235,8 @@ class RecoveryService:
                 message = p.decode_message(raw)
                 p.validate_match(burn, message)
                 p.receive_calldata(raw, attestation)  # Structural signature-size validation.
-                matched[(raw.lower(), attestation.lower())] = (message, raw, attestation)
+                receipt_hint = row.get("destinationMintTxHash") or row.get("forwardTxHash")
+                matched[(raw.lower(), attestation.lower())] = (message, raw, attestation, receipt_hint)
             except (ValueError, KeyError, TypeError):
                 continue
         if len(matched) == 1:
@@ -243,6 +244,18 @@ class RecoveryService:
         if not matched and pending:
             return None
         raise ValueError("No unique attestation matches the exact original burn.")
+
+    async def _destination_receipt_url(self, hint: str | None, raw: str, message: p.Message) -> str | None:
+        if not hint:
+            return None
+        try:
+            tx_hash = p.hash32(hint)
+            receipt = await self.arc.call("eth_getTransactionReceipt", [tx_hash])
+        except (ValueError, UpstreamError):
+            return None
+        if p.matches_mint_receipt(receipt, tx_hash, raw, message):
+            return f"{p.ARC_EXPLORER}/tx/{tx_hash}"
+        return None
 
     async def _message_state(self, message: p.Message, caller: str | None = None) -> str:
         await self._verify_chain(self.arc, 5042002, p.TRANSMITTER)
@@ -272,9 +285,11 @@ class RecoveryService:
             if attested is None:
                 status = "awaiting_attestation"
             else:
-                message, _, _ = attested
+                message, raw, _, receipt_hint = attested
                 row.update(nonce=message.nonce, fee=p.usdc(message.fee), net_amount=p.usdc(message.amount - message.fee))
                 status = await self._message_state(message, caller)
+                if status == "completed":
+                    row["destination_url"] = await self._destination_receipt_url(receipt_hint, raw, message)
                 if status == "ready":
                     if source_head is None:
                         source_head = quantity(await self.base.call("eth_blockNumber"))
@@ -301,7 +316,7 @@ class RecoveryService:
         attested = await self._matched_attestation(burn)
         if attested is None:
             raise ValueError("Transfer is awaiting_attestation. Refresh later.")
-        message, raw, attestation = attested
+        message, raw, attestation, _ = attested
         status = await self._message_state(message, caller)
         if status != "ready":
             raise ValueError(f"Transfer is {status}. {EXPLANATIONS[status]}")

@@ -8,6 +8,7 @@ import re
 from dataclasses import dataclass
 
 from eth_abi import decode, encode
+from eth_abi.exceptions import DecodingError
 from eth_utils import keccak
 
 ZERO = "0x" + "00" * 20
@@ -15,6 +16,8 @@ MESSENGER = "0x8fe6b999dc680ccfdd5bf7eb0974218be2542daa"
 TRANSMITTER = "0xe737e5cebeeba77efe34d4aa090756590b1ce275"
 USDC = "0x036cbd53842c5426634e7929541ec2318f3dcf7e"
 BURN_TOPIC = "0x" + keccak(text="DepositForBurn(address,uint256,address,bytes32,uint32,bytes32,bytes32,uint256,uint32,bytes)").hex()
+RECEIVED_TOPIC = "0x" + keccak(text="MessageReceived(address,uint32,bytes32,bytes32,uint32,bytes)").hex()
+ARC_EXPLORER = "https://explorer.testnet.arc.io"
 
 
 def address(value: str) -> str:
@@ -106,6 +109,40 @@ def decode_message(value: str) -> Message:
         amount=number(216), depositor=evm_word(raw[248:280]), max_fee=number(280),
         fee=number(312), expires_at=number(344), hook=raw[376:],
     )
+
+
+def matches_mint_receipt(receipt: object, tx_hash: str, raw_message: str, message: Message) -> bool:
+    """Match Circle's suggested destination hash to an exact onchain receipt."""
+    if not isinstance(receipt, dict) or receipt.get("status") != "0x1":
+        return False
+    try:
+        if hash32(receipt.get("transactionHash")) != tx_hash:
+            return False
+    except ValueError:
+        return False
+    logs = receipt.get("logs")
+    if not isinstance(logs, list):
+        return False
+    expected_body = hex_bytes(raw_message)[148:]
+    for log in logs:
+        if not isinstance(log, dict) or log.get("removed") or str(log.get("address", "")).lower() != TRANSMITTER:
+            continue
+        topics = log.get("topics")
+        if not isinstance(topics, list) or len(topics) != 4:
+            continue
+        try:
+            if hash32(topics[0]) != RECEIVED_TOPIC or hash32(topics[2]) != message.nonce:
+                continue
+            caller = evm_word(hex_bytes(hash32(topics[1])))
+            if message.caller != ZERO and caller != message.caller:
+                continue
+            source_domain, sender, body = decode(["uint32", "bytes32", "bytes"], hex_bytes(log.get("data")))
+            if (source_domain == message.source_domain and evm_word(sender) == message.sender
+                    and body == expected_body and int(hash32(topics[3]), 16) == message.executed_finality):
+                return True
+        except (DecodingError, ValueError):
+            continue
+    return False
 
 
 def decode_burn(log: dict) -> Burn:

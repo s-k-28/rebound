@@ -3,6 +3,7 @@ import json
 
 import httpx
 import pytest
+from eth_abi import encode
 
 from rebound import service
 from rebound.clients import Rpc, UpstreamError
@@ -113,6 +114,41 @@ async def test_prepare_rechecks_nonce_instead_of_trusting_previous_ready(setup_s
     state["used"] = True
     with pytest.raises(ValueError, match="completed"):
         await app.prepare("0x" + "cd" * 32, 3, WALLET)
+
+
+@pytest.mark.parametrize("receipt_variant", ["matching", "wrong_nonce", "wrong_body", "reverted", "missing"])
+async def test_completed_links_only_to_a_matching_arc_receipt(setup_service, receipt_variant):
+    from rebound import protocol
+    from tests.test_protocol import word_address
+
+    app, state = setup_service
+    state["used"] = True
+    tx_hash = "0x" + "ae" * 32
+    raw = message_hex()
+    state["messages"] = [{"status": "complete", "message": raw, "attestation": "0x" + "11" * 65,
+                          "destinationMintTxHash": tx_hash}]
+    message = protocol.decode_message(raw)
+    body = bytes.fromhex(raw[2:])[148:]
+    receipt = {"status": "0x0" if receipt_variant == "reverted" else "0x1", "transactionHash": tx_hash,
+               "logs": [{"address": protocol.TRANSMITTER,
+                         "topics": [protocol.RECEIVED_TOPIC, "0x" + word_address(WALLET).hex(),
+                                    "0x" + "ff" * 32 if receipt_variant == "wrong_nonce" else message.nonce,
+                                    "0x" + (2000).to_bytes(32, "big").hex()],
+                         "data": "0x" + encode(["uint32", "bytes32", "bytes"],
+                                               [6, word_address(protocol.MESSENGER),
+                                                b"wrong" if receipt_variant == "wrong_body" else body]).hex()}]}
+    original = app.arc.call
+
+    async def arc_call(method, params=None):
+        if method == "eth_getTransactionReceipt":
+            assert params == [tx_hash]
+            return None if receipt_variant == "missing" else receipt
+        return await original(method, params)
+
+    app.arc.call = arc_call
+    row = (await app.scan(WALLET, blocks=150))["transfers"][0]
+    assert row["status"] == "completed"
+    assert row["destination_url"] == (f"https://explorer.testnet.arc.io/tx/{tx_hash}" if receipt_variant == "matching" else None)
 
 
 async def test_unrelated_wallet_is_not_attributed_a_transfer(setup_service):

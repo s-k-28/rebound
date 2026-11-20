@@ -483,6 +483,10 @@ class InboxUI:
             ft.Divider(color=LINE), *values,
             self.text("The original recipient cannot be changed.", 10, MUTED),
         ], spacing=19), padding=22), self.next_step(item, description)]
+        destination_url = item.get("destination_url") if not self.state.example and not item.get("example") else None
+        if destination_url:
+            controls.insert(2, ft.Container(ft.TextButton("Open verified Arc receipt", url=destination_url,
+                icon=ft.Icons.OPEN_IN_NEW_ROUNDED), padding=ft.Padding.only(left=12, bottom=10)))
         evidence = ft.ExpansionTile(title=self.text("Transfer evidence", 12, INK, ft.FontWeight.W_600),
             controls=[ft.Container(ft.Column([
                 self.value_line("Source transaction", item["tx_hash"], selectable=True),
