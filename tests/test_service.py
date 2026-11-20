@@ -494,6 +494,26 @@ async def test_submitted_receipt_is_verified_without_a_circle_hint_or_database_w
     assert app.store.candidates(WALLET) == []
 
 
+async def test_verified_submitted_receipt_supplies_mint_time_without_a_circle_hint(submitted_arc_receipt):
+    app, _, tx_hash, _, destination = submitted_arc_receipt
+    destination["block"]["timestamp"] = "0x6affec78"
+    reads = []
+    original = app.arc.call
+
+    async def counted_arc(method, params=None):
+        if method == "eth_getBlockByNumber":
+            reads.append(params)
+        return await original(method, params)
+
+    app.arc.call = counted_arc
+    row, = (await app.inspect_transaction("0x" + "cd" * 32, log_index=3,
+                                          destination_hash=tx_hash))["transfers"]
+    assert row["status"] == "completed" and row["submitted_receipt_verified"] is True
+    assert row["minted_at"] == "2026-11-20T06:45:12+00:00"
+    assert row["destination_url"] is None
+    assert reads == [["0x2bc", False]]  # Reuse the exact receipt's verification read.
+
+
 @pytest.mark.parametrize("failure", ["wrong_nonce", "reorg", "unavailable", "reverted", "missing"])
 async def test_bad_submitted_hint_does_not_change_consumed_nonce_truth(submitted_arc_receipt, failure):
     app, _, tx_hash, receipt, destination = submitted_arc_receipt
@@ -557,6 +577,96 @@ async def test_submitted_receipt_requires_one_explicit_nonnegative_event_index(s
     with pytest.raises(ValueError, match="log_index"):
         await app.inspect_transaction("0x" + "cd" * 32, log_index=index,
                                       destination_hash="0x" + "ae" * 32)
+
+
+def with_base_block_time(app, timestamp="0x6affec15"):
+    """Add a timestamp to the Base blocks the fixture returns (Base Sepolia block 61,175,721)."""
+    original = app.base.call
+
+    async def base_call(method, params=None):
+        result = await original(method, params)
+        return result | {"timestamp": timestamp} if method == "eth_getBlockByNumber" else result
+
+    app.base.call = base_call
+
+
+async def test_burn_and_mint_times_come_from_the_canonical_blocks_already_read(submitted_arc_receipt):
+    app, state, tx_hash, _, destination = submitted_arc_receipt
+    state["messages"] = [{"status": "complete", "message": message_hex(),
+                          "attestation": "0x" + "11" * 65, "destinationMintTxHash": tx_hash}]
+    destination["block"]["timestamp"] = "0x6affec78"  # Arc Testnet block 73,147,365
+    with_base_block_time(app)
+    for row in [(await app.scan(WALLET, blocks=150))["transfers"][0],
+                (await app.inspect_transaction("0x" + "cd" * 32, log_index=3))["transfers"][0]]:
+        assert row["status"] == "completed"
+        assert row["destination_url"] == f"https://explorer.testnet.arc.io/tx/{tx_hash}"
+        assert (row["burned_at"], row["minted_at"]) == ("2026-11-20T06:43:33+00:00", "2026-11-20T06:45:12+00:00")
+
+
+async def test_waiting_burn_has_a_time_but_no_mint_time(setup_service):
+    app, state = setup_service
+    state["circle_status"] = 404
+    with_base_block_time(app)
+    row, = (await app.scan(WALLET, blocks=150))["transfers"]
+    assert row["status"] == "awaiting_attestation"
+    assert (row["burned_at"], row["minted_at"]) == ("2026-11-20T06:43:33+00:00", None)
+
+
+@pytest.mark.parametrize("timestamp", [253_402_300_800, 2**64])
+async def test_out_of_range_source_time_cannot_change_verified_recovery_status(setup_service, timestamp):
+    app, _ = setup_service
+    with_base_block_time(app, hex(timestamp))
+    row, = (await app.scan(WALLET, blocks=150))["transfers"]
+    assert row["status"] == "ready"
+    assert row["source_verified"] is True and row["attestation_matched"] is True
+    assert row["burned_at"] is None and row["minted_at"] is None
+    assert app._block_times == {}
+
+
+@pytest.mark.parametrize("timestamp", [253_402_300_800, 2**64])
+async def test_out_of_range_arc_time_cannot_change_verified_delivery(submitted_arc_receipt, timestamp):
+    app, state, tx_hash, _, destination = submitted_arc_receipt
+    state["messages"] = [{"status": "complete", "message": message_hex(),
+                          "attestation": "0x" + "11" * 65, "destinationMintTxHash": tx_hash}]
+    with_base_block_time(app)
+    destination["block"]["timestamp"] = hex(timestamp)
+    row, = (await app.inspect_transaction("0x" + "cd" * 32, log_index=3))["transfers"]
+    assert row["status"] == "completed" and row["nonce_used"] is True
+    assert row["source_verified"] is True and row["attestation_matched"] is True
+    assert row["destination_url"] == f"https://explorer.testnet.arc.io/tx/{tx_hash}"
+    assert row["burned_at"] == "2026-11-20T06:43:33+00:00" and row["minted_at"] is None
+    assert destination["block"]["hash"] not in app._block_times
+
+
+@pytest.mark.parametrize("timestamp", [253_402_300_800, 2**64])
+def test_cached_unrepresentable_time_remains_optional(setup_service, timestamp):
+    app, _ = setup_service
+    block_hash = "0x" + "ef" * 32
+    app._block_times[block_hash] = timestamp
+    assert app._block_time(block_hash) is None
+
+
+async def test_missing_or_reorged_block_time_is_never_filled_in(setup_service):
+    app, state = setup_service
+    row, = (await app.scan(WALLET, blocks=150))["transfers"]
+    assert row["status"] == "ready" and (row["burned_at"], row["minted_at"]) == (None, None)
+    with_base_block_time(app)
+    assert (await app.scan(WALLET, blocks=150))["transfers"][0]["burned_at"] is not None
+    state["canonical"] = False  # The cached time belongs to a block hash that is no longer canonical.
+    row, = (await app.scan(WALLET, blocks=150))["transfers"]
+    assert row["status"] == "source_changed" and row["burned_at"] is None
+
+
+def test_block_time_cache_skips_invalid_blocks_and_stays_bounded(monkeypatch):
+    monkeypatch.setattr(service, "BLOCK_TIME_CACHE_SIZE", 2)
+    times = {}
+    for block in [{"hash": "0x" + "01" * 32, "timestamp": "6affec15"}, {"hash": "0x" + "01" * 32},
+                  {"hash": "not-a-hash", "timestamp": "0x1"}, {"timestamp": "0x1"}]:
+        service._remember_block_time(times, block)
+    assert times == {}
+    for index in range(1, 4):
+        service._remember_block_time(times, {"hash": "0x" + f"{index:02x}" * 32, "timestamp": hex(index)})
+    assert times == {"0x" + "02" * 32: 2, "0x" + "03" * 32: 3}
 
 
 async def test_unrelated_wallet_is_not_attributed_a_transfer(setup_service):
