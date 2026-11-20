@@ -40,4 +40,5 @@ Official references: [filters](https://www.quicknode.com/docs/streams/filters), 
 
 QuickNode's **Check Connection** returned `401 Invalid or stale Stream signature`.
 The separate **Send Payload** test reported **Stream test successful**.
+In a separate local adapter check, the real controlled Base receipt passed through the filter, signed gzip payload and wallet-only Stream index lookup. Rebound linked the matching canonical Arc receipt.
 Live Base Sepolia burn delivery still needs to be verified with **Search Stream index**.
