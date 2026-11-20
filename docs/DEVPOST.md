@@ -14,7 +14,7 @@ A sender can close the bridge, lose the transaction hash, and still need to know
 
 ## How it works
 
-The Python service finds CCTP burns on Base Sepolia, verifies their source receipts and matches Circle’s attested messages. It checks the nonce through Arc’s MessageTransmitterV2 contract and links a matching destination receipt when available. The historical demo reads the nonce before and after a real mint and simulates the same call at the earlier block. Flet renders the inbox. SQLite stores candidate events.
+The Python service finds CCTP burns on Base Sepolia, verifies their source receipts and matches Circle’s attested messages. It checks the nonce through Arc’s MessageTransmitterV2 contract and links a matching canonical receipt when available. In a controlled testnet run, Rebound found a 1-USDC transfer by wallet address, completed the Arc mint through local signing and refused a second preparation for the same nonce. Flet renders the inbox. SQLite stores candidate events. [Live recovery evidence](LIVE-RECOVERY.md)
 
 ## What makes it different
 
@@ -22,7 +22,7 @@ Discovery starts with a public wallet address and a displayed history range. The
 
 ## What we would build next
 
-Verify a controlled testnet recovery from source burn through destination mint, extend wallet history with a live index, and add a wallet-based signing handoff.
+Extend wallet history with a live index and add a wallet-based signing handoff.
 
 ## Entry details
 
@@ -32,6 +32,6 @@ Verify a controlled testnet recovery from source burn through destination mint, 
 | Chain award | Best Use of Arc |
 | Repository | [s-k-28/rebound](https://github.com/s-k-28/rebound) |
 | Contracts and economics | [Technical README](../README.md#contracts-used) |
-| Demo evidence | [Read-only historical replay](VALIDATION.md#reproduce-the-read-only-check) |
+| Demo evidence | [Controlled recovery](LIVE-RECOVERY.md) and [independent read-only replay](VALIDATION.md#reproduce-the-read-only-check) |
 | Video | Pending verification |
 | QuickNode Streams | Add after observing a real Stream delivery |

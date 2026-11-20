@@ -1,6 +1,6 @@
 # Implementation validation
 
-November 19, 2026. This records observed checks, not a claim of hackathon readiness.
+These November 19 checks reproduce the public historical case. A subsequent controlled testnet recovery was completed on November 20. [Live recovery evidence](LIVE-RECOVERY.md)
 
 ## Live, read-only checks
 
@@ -12,7 +12,7 @@ November 19, 2026. This records observed checks, not a claim of hackathon readin
 - The Stream search identified the same completed transfer after a local adapter test fed a real Base receipt through the filter. Live delivery from QuickNode remains pending.
 - The observed public Base RPC limited log ranges to 200 blocks and rate-limited bursts. The client now subdivides provider-limited log ranges, spaces log requests, bounds retries to read operations, and cancels sibling scan tasks when a required range fails. A failed scan never becomes a successful empty inbox.
 
-No private key was read and no financial transaction, burn, mint or wallet connection was performed in these checks. A real controlled recovery and destination receipt remain required before claiming end-to-end recovery.
+These checks used public addresses, receipts and simulation. See the [controlled run](LIVE-RECOVERY.md) for the separately signed recovery.
 
 ### Circle forwarding coverage
 
@@ -33,7 +33,7 @@ Review found and fixed two edge cases: default Decimal precision could round lar
 
 ## Reproduce the read-only check
 
-Choose **Check a live sample** in the transfer inbox. The app fills the public wallet and fixed block window, then contacts the live Base, Circle and Arc providers. Open the completed transfer and follow **Open verified Arc receipt**.
+The commands below use the original public historical case. The inbox’s **Check a live sample** button also runs a fixed-window search against the live Base, Circle and Arc providers.
 
 ```sh
 uv run python -m rebound.cli scan 0x41f7337769003aec9b0b20789403f8c741d7faad --blocks 200 --end-block 61125511

@@ -1,6 +1,6 @@
 # Demonstrating Rebound
 
-Use the controlled testnet recording when the complete workflow is verified. The historical recording below uses a verified public transfer and read-only simulation.
+The controlled testnet workflow has verified receipts and a duplicate-preparation refusal. The historical sequence below uses a second public transfer and read-only simulation. [Live recovery evidence](LIVE-RECOVERY.md)
 
 ## Historical demo, 2 minutes 35 seconds
 
@@ -31,7 +31,7 @@ The recording uses [the public sample](VALIDATION.md#reproduce-the-read-only-che
 
 **Why Arc?** The contract the product checks and calls for settlement is on Arc. The review expresses the caller’s gas budget in native testnet USDC separately from the message’s attested fee.
 
-**What does the recorded example prove?** It shows a real receipt and a successful simulation against historical Arc state. Record a controlled testnet burn and mint separately before claiming Rebound completed a new recovery.
+**What does the recorded example prove?** It shows a real receipt and a successful simulation against historical Arc state. The team’s [controlled testnet run](LIVE-RECOVERY.md) separately verifies address-only discovery, local signing and duplicate-preparation refusal.
 
 ## Controlled testnet preparation
 
@@ -53,13 +53,13 @@ The recording uses [the public sample](VALIDATION.md#reproduce-the-read-only-che
 
 ## Final sign-off checklist
 
-All items are pending until independently recorded; this document does not certify a completed live run.
+The first five checks were verified in the [controlled testnet run](LIVE-RECOVERY.md).
 
-- [ ] Source receipt proves a small controlled manual burn of canonical Base Sepolia USDC to the intended Arc recipient.
-- [ ] A fresh app/browser session discovers it using only the public wallet address, with the actual scan range visible.
-- [ ] Live Circle status, original message fields and unused Arc nonce explain why the mint is eligible.
-- [ ] The explicitly approved local testnet recovery produces a successful Arc receipt with the expected `MessageReceived` nonce.
-- [ ] A refreshed inbox shows completed, and a second preparation attempt for the same burn refuses another mint before signing/broadcast.
+- [x] Source receipt proves a small controlled manual burn of canonical Base Sepolia USDC to the intended Arc recipient.
+- [x] A fresh app/browser session discovers it using only the public wallet address, with the actual scan range visible.
+- [x] Live Circle status, original message fields and unused Arc nonce explain why the mint is eligible.
+- [x] The explicitly approved local testnet recovery produces a successful Arc receipt with the expected `MessageReceived` nonce.
+- [x] A refreshed inbox shows completed, and a second preparation attempt for the same burn refuses another mint before signing/broadcast.
 - [ ] An actual configured QuickNode Stream delivers the known burn to the authenticated HTTPS endpoint. Preserve the Stream ID, deployed filter revision, destination, network/dataset, backfill range and delivery record; redact credentials.
 - [ ] Public hosting, desktop/mobile use and the current local-signing handoff are verified. Browser signing is not described as available until a working connector has been tested.
 - [ ] The published revision and accessible 2–3 minute video reproduce the evidence above. Example cases remain visibly synthetic.

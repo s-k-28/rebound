@@ -2,7 +2,7 @@
 
 Rebound finds interrupted USDC transfers from a public wallet address. It checks the source receipt, matches Circle’s message and reads Arc’s nonce state so users can decide whether to wait or finish the existing transfer.
 
-**Initial route: Base Sepolia → Arc Testnet.** This is a testnet prototype, with a Python/Flet browser interface, a FastAPI backend and a local Python recovery command. Browser wallet signing, public hosting and a recorded end-to-end testnet recovery remain separate release gates. Example transfers are synthetic and labeled; they are never claimable funds.
+**Initial route: Base Sepolia → Arc Testnet.** Rebound uses a Python/Flet browser interface, a FastAPI backend and a local Python recovery command. A controlled 1-USDC testnet recovery verified address-only discovery, the Arc mint and the refusal to prepare a duplicate mint. [Live recovery evidence](docs/LIVE-RECOVERY.md)
 
 Read the [PRD](docs/PRD.md), [implementation and release plan](docs/superpowers/plans/2026-11-19-rebound.md), [live demo procedure](docs/DEMO.md), [controlled testnet lab](docs/LAB.md) and [QuickNode setup](docs/QUICKNODE.md).
 
@@ -56,7 +56,7 @@ Use **History options** in the browser or `--end-block` in the CLI to revisit a 
 
 Open `/demo` or search for `0x05af7613449b84f2a02893d35e6cdee479404ce8` to use the synthetic wallet. **Show simulated Stream delivery** opens an example of the Stream discovery workflow. This demo uses local fixture data and cannot prepare a transaction.
 
-For a real Base Sepolia backfill, use the public sample wallet and source block in [live validation](docs/VALIDATION.md#reproduce-the-read-only-check).
+For a real Base Sepolia backfill, use the public wallet and source block from the controlled run. The [validation notes](docs/VALIDATION.md#reproduce-the-read-only-check) include an independent historical case.
 
 For a completed direct mint, **Replay historical mint** verifies the original receipt, reads the nonce at the previous block and the receipt block, then simulates the same attestation against the previous block. The replay requires an Arc RPC that serves historical state and uses reads only.
 
@@ -154,17 +154,17 @@ Protocol tests exercise message fields, recipient/caller/amount matching, malfor
 - Discovery covers canonical native USDC `DepositForBurn` events from the supported TokenMessengerV2 to Arc. Rebound checks Circle-forwarded mints in read-only mode. For forwarding with an app hook, the verified receipt establishes the CCTP mint and the original app handles downstream actions. Manual recovery is available for eligible hook-free burns. [Circle forwarding formats](https://developers.circle.com/cctp/concepts/forwarding-service#hook-format)
 - Source and destination RPCs, Circle indexing and gas availability remain external dependencies.
 - No seed recovery, arbitrary crypto recovery, loss insurance, mainnet support or recipient redirection.
-- Seamless browser wallet signing, real QuickNode deployment, public hosting, live testnet recovery evidence and the submission video remain release gates. A filter file or synthetic webhook alone does not qualify for the QuickNode bounty.
+- Browser wallet signing, durable hosting and an observed live QuickNode delivery remain open. A temporary HTTPS preview is available for testing. The demo wallet is a synthetic fixture.
 - Originality, recurring use, user demand and willingness to pay remain hypotheses rather than validated metrics.
 
 ## Final release gates
 
-The local prototype and its automated checks are distinct from a completed live demonstration. Keep each item below pending until its evidence exists:
+The [November 20 run](docs/LIVE-RECOVERY.md) records the receipts, screenshots and commands for the first four gates.
 
-- [ ] **Controlled source burn**. Use the [testnet lab](docs/LAB.md) to rehearse a small manual Base Sepolia → Arc Testnet transfer using canonical USDC, an owned recipient and a zero destination caller. After a funded testnet run, preserve the source receipt before the destination mint.
-- [ ] **Fresh-session discovery:** discard browser/app state, enter only the public wallet address, and discover that burn inside the displayed history range without preloading its hash.
-- [ ] **Actual destination mint:** prepare and approve the testnet recovery locally; preserve the successful Arc receipt and its `MessageReceived` event matching the original nonce and fixed recipient.
-- [ ] **Second attempt blocked as completed:** refresh the inbox and attempt preparation for that same source hash/log. Show completed state and refusal to prepare another mint; do not create a new burn or broadcast a second recovery transaction.
+- [x] **Controlled source burn**. The testnet lab created a 1-USDC manual transfer to an owned recipient with zero destination caller and preserved the Base receipt.
+- [x] **Fresh-session discovery**. An empty inbox found the burn from the wallet address alone and displayed it as ready to finish.
+- [x] **Actual destination mint**. The locally signed Arc receipt matched the original nonce and credited 0.99987 USDC to the fixed recipient.
+- [x] **Second attempt blocked as completed**. A repeated preparation for the same source hash and log returned the completed-state refusal before signing.
 - [ ] **Real QuickNode delivery:** configure an actual Stream, filter and HTTPS destination; preserve its Stream ID, configuration, history range and observed delivery of a known burn into the inbox. A filter file, local fixture or synthetic webhook is insufficient.
 - [ ] **Accessible deployment and wallet experience:** verify the public app on desktop and mobile, document the current local-signing handoff, and complete a browser wallet connector before claiming seamless browser signing.
 - [ ] **Submission evidence:** publish the tested source revision, setup instructions and an accessible 2–3 minute video. Keep example data labeled and separate from live receipt evidence.
