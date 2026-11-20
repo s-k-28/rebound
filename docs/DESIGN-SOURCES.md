@@ -1,5 +1,7 @@
 # Rebound design direction
 
+The current interface direction is in [DESIGN.md](DESIGN.md). It replaces the template references below, which are kept as history.
+
 The first frontend was rejected as too generic. The revision uses specialist finance and product-design references, with original Python/Flet controls rather than imported template source or purchased assets.
 
 ## Reviewed references
