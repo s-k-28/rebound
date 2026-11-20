@@ -683,8 +683,10 @@ class InboxUI:
                                    padding=ft.Padding.symmetric(horizontal=9, vertical=2))
         links = [self.link("Coverage", self.coverage, color=INK_2), self.link("How it works", self.about, color=INK_2)]
         if self.narrow:
-            content = ft.Column([ft.Row([brand, environment, ft.Container(expand=True), *links], spacing=4),
-                                 route], spacing=0)
+            content = ft.Column([
+                ft.Row([brand, ft.Container(expand=True), *links], spacing=4),
+                ft.Row([route, environment], spacing=8),
+            ], spacing=0)
             padding = ft.Padding.only(left=16, right=8, top=4, bottom=10)
         else:
             content = ft.Row([brand, ft.Container(width=1, height=16, bgcolor=RULE_STRONG), route, environment,
