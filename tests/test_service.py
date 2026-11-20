@@ -348,6 +348,26 @@ async def test_submitted_receipt_is_verified_without_a_circle_hint_or_database_w
     assert app.store.candidates(WALLET) == []
 
 
+async def test_verified_submitted_receipt_supplies_mint_time_without_a_circle_hint(submitted_arc_receipt):
+    app, _, tx_hash, _, destination = submitted_arc_receipt
+    destination["block"]["timestamp"] = "0x6affec78"
+    reads = []
+    original = app.arc.call
+
+    async def counted_arc(method, params=None):
+        if method == "eth_getBlockByNumber":
+            reads.append(params)
+        return await original(method, params)
+
+    app.arc.call = counted_arc
+    row, = (await app.inspect_transaction("0x" + "cd" * 32, log_index=3,
+                                          destination_hash=tx_hash))["transfers"]
+    assert row["status"] == "completed" and row["submitted_receipt_verified"] is True
+    assert row["minted_at"] == "2026-11-20T06:45:12+00:00"
+    assert row["destination_url"] is None
+    assert reads == [["0x2bc", False]]  # Reuse the exact receipt's verification read.
+
+
 @pytest.mark.parametrize("failure", ["wrong_nonce", "reorg", "unavailable", "reverted", "missing"])
 async def test_bad_submitted_hint_does_not_change_consumed_nonce_truth(submitted_arc_receipt, failure):
     app, _, tx_hash, receipt, destination = submitted_arc_receipt

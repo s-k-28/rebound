@@ -645,6 +645,8 @@ class RecoveryService:
                         if submitted is not None:
                             row.update(submitted_receipt_verified=True,
                                        submitted_receipt_url=f"{p.ARC_EXPLORER}/tx/{destination_hash}")
+                            if row["minted_at"] is None:
+                                row["minted_at"] = self._block_time(p.hash32(submitted["blockHash"]))
                 elif delivery_mode:
                     status = "managed_delivery"
                 elif status == "ready" and source_confirming:
