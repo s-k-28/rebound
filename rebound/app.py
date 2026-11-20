@@ -59,8 +59,9 @@ def create_app(recovery: RecoveryService | None = None, *, include_ui: bool = Tr
 
     @api.get("/api/scan")
     async def scan(wallet: Annotated[str, Query(pattern=WALLET_PATTERN)],
-                   blocks: Annotated[int, Query(ge=1, le=50000)] = 2000):
-        return await checked(recovery.scan(wallet, blocks=blocks))
+                   blocks: Annotated[int, Query(ge=1, le=50000)] = 2000,
+                   end_block: Annotated[int | None, Query(ge=0)] = None):
+        return await checked(recovery.scan(wallet, blocks=blocks, end_block=end_block))
 
     @api.post("/api/prepare")
     async def prepare(payload: PrepareRequest):

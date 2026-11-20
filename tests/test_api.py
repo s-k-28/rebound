@@ -12,6 +12,7 @@ async def test_invalid_scan_is_rejected_before_any_upstream_work(setup_service):
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         assert (await client.get("/api/scan", params={"wallet": "not-a-wallet"})).status_code == 422
         assert (await client.get("/api/scan", params={"wallet": WALLET, "blocks": 50001})).status_code == 422
+        assert (await client.get("/api/scan", params={"wallet": WALLET, "end_block": -1})).status_code == 422
 
 
 async def test_api_preserves_real_discovery_and_disabled_stream_semantics(setup_service):
@@ -22,6 +23,9 @@ async def test_api_preserves_real_discovery_and_disabled_stream_semantics(setup_
         result = await client.get("/api/scan", params={"wallet": WALLET, "blocks": 150})
         assert result.status_code == 200
         assert result.json()["transfers"][0]["status"] == "ready"
+        fixed = await client.get("/api/scan", params={"wallet": WALLET, "blocks": 20, "end_block": 101})
+        assert fixed.status_code == 200
+        assert (fixed.json()["from_block"], fixed.json()["to_block"]) == (82, 101)
         assert (await client.post("/api/streams", json={"logs": []})).status_code == 503
 
 

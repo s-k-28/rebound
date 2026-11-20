@@ -100,7 +100,7 @@ class InboxState:
                 "ready": sum(item["status"] == "ready" for item in self.transfers),
                 "completed": sum(item["status"] == "completed" for item in self.transfers)}
 
-    async def scan(self, service: Any, wallet: str, blocks: int) -> None:
+    async def scan(self, service: Any, wallet: str, blocks: int, end_block: str = "") -> None:
         self.busy = True
         self.example = False
         self.scanned = False
@@ -111,9 +111,14 @@ class InboxState:
         self.selected = None
         self.prepared = None
         self.filter = "all"
+        self.query = ""
         try:
             self.wallet = address(wallet.strip())
-            result = await service.scan(self.wallet, blocks=blocks)
+            anchor = end_block.strip()
+            if anchor and (not anchor.isascii() or not anchor.isdecimal() or len(anchor) > 16):
+                raise ValueError("Enter a Base Sepolia end block using digits only.")
+            options = {"end_block": int(anchor)} if anchor else {}
+            result = await service.scan(self.wallet, blocks=blocks, **options)
             self.transfers = result["transfers"]
             self.coverage = result.get("coverage") or f"Base Sepolia blocks {result['from_block']:,}–{result['to_block']:,}."
             self.partial = bool(result.get("partial"))
@@ -147,12 +152,16 @@ class InboxUI:
             autocorrect=False, on_submit=self.scan,
         )
         self.history = ft.Dropdown(
-            value="2000", label="Recent history", width=230, text_size=13,
+            value="2000", label="Scan length", width=230, text_size=13,
             options=[ft.DropdownOption("2000", "2,000 source blocks"),
                      ft.DropdownOption("10000", "10,000 source blocks"),
                      ft.DropdownOption("50000", "50,000 source blocks")],
             filled=True, fill_color="#FFFFFF", border_color=LINE, border_radius=10,
         )
+        self.end_block = ft.TextField(label="End block (optional)", hint_text="Latest when blank",
+            keyboard_type=ft.KeyboardType.NUMBER, text_size=13, width=235, border_color=LINE,
+            focused_border_color=BLUE, border_radius=9, on_submit=self.scan, autocorrect=False)
+        self.show_history = False
         self.caller_input = ft.TextField(
             label="Address that will sign the destination transaction", hint_text="0x…",
             text_size=14, filled=True, fill_color="#FFFFFF", border_color=LINE,
@@ -228,6 +237,7 @@ class InboxUI:
     def render(self) -> None:
         self.wallet_input.disabled = self.state.busy
         self.history.disabled = self.state.busy
+        self.end_block.disabled = self.state.busy
         self.search_input.value = self.state.query
         content = [self.workspace_heading(), self.scan_panel(), self.metrics()]
         if self.state.example:
@@ -348,6 +358,14 @@ class InboxUI:
                             ft.Container(expand=True), self.text("Read-only discovery", 10, MUTED, visible=not self.narrow)], spacing=8),
                     form, ft.Row([ft.Icon(ft.Icons.LOCK_OUTLINE_ROUNDED, color=MUTED, size=13),
                                   self.text("A public address is all you need. Your keys stay with you.", 11, MUTED)], spacing=6)]
+        history_label = "Hide history options" if self.show_history else "History options"
+        if not self.show_history and self.end_block.value.strip():
+            history_label = f"History options · end block {self.end_block.value.strip()[:16]}"
+        controls.append(ft.TextButton(history_label,
+            icon=ft.Icons.HISTORY_ROUNDED, on_click=self.toggle_history, disabled=self.state.busy))
+        if self.show_history:
+            controls.append(ft.Row([self.end_block, self.text("Use a Base Sepolia block number to revisit an older window.", 11, MUTED)],
+                wrap=True, spacing=12))
         if self.state.busy:
             controls.extend([ft.ProgressBar(color=BLUE, bgcolor="#E8F0E9", bar_height=3),
                              self.text("Reading source events, Circle attestations and destination state…", 11, MUTED)])
@@ -596,7 +614,12 @@ class InboxUI:
             return
         self.state.busy = True
         self.render()
-        await self.state.scan(self.service, self.wallet_input.value or self.state.wallet, int(self.history.value or "2000"))
+        await self.state.scan(self.service, self.wallet_input.value or self.state.wallet,
+                              int(self.history.value or "2000"), self.end_block.value or "")
+        self.render()
+
+    def toggle_history(self, _=None):
+        self.show_history = not self.show_history
         self.render()
 
     def examples(self, _=None) -> None:

@@ -36,10 +36,13 @@ The same service is available locally:
 ```bash
 uv run python -m rebound.cli --help
 uv run python -m rebound.cli scan "$WALLET_ADDRESS" --blocks 2000
+uv run python -m rebound.cli scan "$WALLET_ADDRESS" --blocks 200 --end-block 61125511
 uv run python -m rebound.cli prepare "$BURN_TX_HASH" "$LOG_INDEX" --caller "$CALLER_ADDRESS"
 ```
 
 Set those variables to your own public address, the original burn hash and the decimal `DepositForBurn` log index shown in the inbox. `prepare` exports an unsigned destination transaction only after fresh source/message/nonce checks and destination simulation. It does not send anything or request a key.
+
+Use **History options** in the browser or `--end-block` in the CLI to revisit a fixed source block window. The fixed range includes only burns in that window. Transfer status still reflects current chain state. When Circle supplies a destination transaction hash for a completed transfer, Rebound links to Arc after checking the successful receipt and its matching CCTP event.
 
 ### Complete a transfer locally
 

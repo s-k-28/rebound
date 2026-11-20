@@ -74,6 +74,21 @@ async def test_scan_discovers_without_hash_and_reports_coverage(setup_service):
     assert result["transfers"][0]["recipient"] == WALLET
 
 
+async def test_fixed_history_finds_old_burn_without_mixing_in_other_cached_blocks(setup_service):
+    app, _ = setup_service
+    app.ingest_logs([burn_log() | {"transactionHash": "0x" + "88" * 32, "blockNumber": "0xc8"}])
+    result = await app.scan(WALLET, blocks=20, end_block=101)
+    assert (result["from_block"], result["to_block"]) == (82, 101)
+    assert [row["block_number"] for row in result["transfers"]] == [100]
+    assert result["transfers"][0]["status"] == "ready"  # Confirmations use today's head, not the anchor.
+
+
+async def test_future_end_block_is_rejected(setup_service):
+    app, _ = setup_service
+    with pytest.raises(ValueError, match="at or before"):
+        await app.scan(WALLET, end_block=201)
+
+
 async def test_source_reorg_never_becomes_ready(setup_service):
     app, state = setup_service
     state["canonical"] = False

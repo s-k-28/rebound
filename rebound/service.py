@@ -109,14 +109,19 @@ class RecoveryService:
                 continue
         return accepted
 
-    async def scan(self, wallet: str, blocks: int = 2000) -> dict:
+    async def scan(self, wallet: str, blocks: int = 2000, *, end_block: int | None = None) -> dict:
         wallet = p.address(wallet)
         if not isinstance(blocks, int) or isinstance(blocks, bool) or not 1 <= blocks <= 50_000:
             raise ValueError("History must contain between 1 and 50,000 source blocks.")
+        if end_block is not None and (type(end_block) is not int or end_block < 0):
+            raise ValueError("End block must be a non-negative block number.")
         async with self._scan_slots:
             await self._verify_chain(self.base, 84532, p.MESSENGER)
             latest = quantity(await self.base.call("eth_blockNumber"))
-            start = max(0, latest - blocks + 1)
+            if end_block is not None and end_block > latest:
+                raise ValueError(f"End block must be at or before Base Sepolia block {latest:,}.")
+            end = latest if end_block is None else end_block
+            start = max(0, end - blocks + 1)
             source_token = "0x" + "00" * 12 + p.USDC[2:]
 
             async def read_chunk(first: int, last: int):
@@ -151,8 +156,8 @@ class RecoveryService:
 
             # Any failed chunk fails this scan rather than pretending history was complete.
             size = self._log_chunk_size
-            await _gather_reads(*(read_chunk(first, min(first + size - 1, latest)) for first in range(start, latest + 1, size)))
-            burns = self.store.candidates(wallet)
+            await _gather_reads(*(read_chunk(first, min(first + size - 1, end)) for first in range(start, end + 1, size)))
+            burns = self.store.candidates(wallet, block_range=(start, end) if end_block is not None else None)
             partial = len(burns) > 100
 
             async def inspect(burn):
@@ -160,9 +165,10 @@ class RecoveryService:
                     return await self.diagnose(burn, source_head=latest)
 
             transfers = await asyncio.gather(*(inspect(burn) for burn in burns[:100]))
+            indexed = ", plus previously indexed candidates" if end_block is None else " (fixed range)"
             return {
-                "wallet": wallet, "from_block": start, "to_block": latest,
-                "coverage": f"Base Sepolia blocks {start:,}–{latest:,}, plus previously indexed candidates. Native USDC CCTP V2 burns to Arc only; unknown routers and other routes are not covered.",
+                "wallet": wallet, "from_block": start, "to_block": end,
+                "coverage": f"Base Sepolia blocks {start:,}–{end:,}{indexed}. Covers native USDC CCTP V2 burns to Arc.",
                 "partial": partial, "transfers": transfers,
             }
 

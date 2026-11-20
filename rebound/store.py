@@ -32,10 +32,15 @@ class CandidateStore:
                  burn.block_number, json.dumps(log)))
             db.commit()
 
-    def candidates(self, wallet: str, limit: int = 101) -> list[Burn]:
+    def candidates(self, wallet: str, limit: int = 101, *, block_range: tuple[int, int] | None = None) -> list[Burn]:
+        query = "SELECT payload FROM candidates WHERE (depositor=? OR recipient=?)"
+        params: tuple = (wallet, wallet)
+        if block_range is not None:
+            query += " AND block_number BETWEEN ? AND ?"
+            params += block_range
+        query += " ORDER BY block_number DESC, log_index DESC, tx_hash ASC LIMIT ?"
         with closing(sqlite3.connect(self.path, timeout=10)) as db:
-            rows = db.execute("""SELECT payload FROM candidates WHERE depositor=? OR recipient=?
-                ORDER BY block_number DESC, log_index DESC LIMIT ?""", (wallet, wallet, limit)).fetchall()
+            rows = db.execute(query, (*params, limit)).fetchall()
         burns = []
         for row in rows:
             try:
