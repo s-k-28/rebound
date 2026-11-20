@@ -1,8 +1,21 @@
-# Demonstrating a real recovery
+# Demonstrating Rebound
 
-This is a release checklist, not evidence that the listed transactions have already happened. Keep synthetic examples labeled throughout recordings.
+Use the controlled testnet recording when the complete workflow is verified. The historical recording below uses a verified public transfer and read-only simulation.
 
-## Preparation
+## Historical demo, 2 minutes 35 seconds
+
+| Time | Screen | Narration |
+|---|---|---|
+| 0:00–0:20 | Fresh Rebound inbox | A wallet owner can lose the bridge link or transaction hash after USDC is burned. They need to know whether the destination was paid before trying again. |
+| 0:20–0:50 | Enter the public sample address and scan the fixed 200-block window | We start with the wallet address. Rebound finds the matching Base Sepolia burn and displays the exact range it checked. |
+| 0:50–1:20 | Inspect the 1-USDC transfer | Rebound checks the canonical source receipt, matches Circle’s CCTP message, and reads the nonce on Arc. This sample’s attested fee was 0.00013 USDC, leaving a mint amount of 0.99987 USDC. |
+| 1:20–1:55 | Replay the historical mint | The previous Arc block shows an unused nonce. The destination call succeeds in simulation at that block. At the next block, the nonce is consumed and the real receipt matches the original message. This is a replay of an existing public transfer. |
+| 1:55–2:20 | Open the Arc receipt and return to the case | The Arc receipt is directly verifiable. Rebound can refresh just this transfer and share a case link pinned to the original burn log. |
+| 2:20–2:35 | Show the public repo and scope | Rebound uses the existing CCTP contracts on Base Sepolia and Arc Testnet. For an eligible direct transfer, it can prepare the original mint for local review and signing. |
+
+The recording uses [the public sample](VALIDATION.md#reproduce-the-read-only-check) and its [Arc receipt](https://explorer.testnet.arc.io/tx/0xd2f74e876f5f9b48ca5836044d0b1fa9723de30672587aacb86b55be6d5bdb00).
+
+## Controlled testnet preparation
 
 1. Run the app using the README. Check the configured Base Sepolia and Arc Testnet RPCs, chain IDs, Circle contracts and Circle sandbox availability.
 2. Use a dedicated testnet wallet with canonical Base Sepolia USDC and enough Base Sepolia ETH for the source transaction. The caller also needs Arc Testnet USDC for destination gas.
