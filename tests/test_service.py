@@ -215,6 +215,40 @@ async def test_time_lookup_has_a_deadline_and_releases_read_slots(setup_service,
     assert app._read_slots._value == 3
 
 
+async def test_time_lookup_deadline_does_not_wait_behind_another_scans_reads(setup_service, monkeypatch):
+    # Live: alone, a UTC lookup took 2.7 s. Beside a 50,000-block scan, whose 300 log reads filled
+    # the read-slot queue, it made one header read and timed out at 30 s.
+    app, state = setup_service
+    state["logs"] = []
+    genesis = 1_700_000_000
+    calls = time_chain(app, state, [genesis + height for height in range(201)])
+    monkeypatch.setattr(service, "TIME_SEARCH_TIMEOUT_SECONDS", 0.5)
+    resolved = asyncio.Event()
+
+    async def other_scan_read():
+        async with app._read_slots:
+            await resolved.wait()
+
+    others = [asyncio.create_task(other_scan_read()) for _ in range(6)]  # 3 hold slots, 3 wait in line.
+    await asyncio.sleep(0)
+    search = app._block_at_time
+
+    async def search_then_release(*args):
+        try:
+            return await search(*args)
+        finally:
+            resolved.set()
+
+    app._block_at_time = search_then_release
+    try:
+        result = await app.scan(WALLET, blocks=2, end_time=utc_cutoff(genesis + 101))
+    finally:
+        resolved.set()
+        await asyncio.gather(*others)
+    assert (result["from_block"], result["to_block"]) == (100, 101) and len(calls) <= 12
+    assert app._read_slots._value == 3
+
+
 async def test_time_lookup_rejects_nonmonotonic_sampled_timestamps(setup_service):
     app, state = setup_service
     genesis = 1_700_000_000
