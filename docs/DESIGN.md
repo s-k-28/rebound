@@ -127,15 +127,25 @@ There are no avatars, no chevrons and no per-row tooltips. A selected row gets a
 
 ### States
 
+Every state below renders inside the ledger frame, where the results will appear, so the frame never jumps.
+
 - **Empty:** one line ("Enter a wallet address to list its USDC transfers from Base Sepolia to Arc.") and two actions: "Check a live sample" and "Explore examples". Tabs and the filter stay hidden until a lookup returns records, so empty counts never show.
-- **Loading:** a 2 px progress rule and the line "Reading source events, Circle attestations and destination state…".
-- **Error:** the service's message in red on a light red notice. It never apologizes.
+- **Validation:** checked before any network call. A red line sits directly under the field ("Enter the full wallet address: 0x followed by 40 hex characters."), the field border turns red, the caret goes back into the field, and the results already on screen stay.
+- **Loading:** a 2 px progress rule on the frame's top edge and the exact request: "Scanning Base Sepolia blocks 61,175,522–61,175,721 for 0x3958…722c" (or "the latest 2,000 Base Sepolia blocks" when no end block is set), then "Reading source events, Circle attestations and destination state…". The previous lookup's rows, counts and errors are never shown under a new one.
+- **Error:** the service's message in red, inside the frame, with "Try again". It never apologizes.
 - **Example mode:** a persistent amber notice ("Example mode. These transfers are synthetic and nothing here can be signed.") with "Return to live". Preparing and signing stay blocked in `InboxState.prepare`.
-- **No results:** a sentence that names what was searched and what to try next. The coverage line stays visible.
+- **No results:** a sentence that names what was searched ("No supported transfers in the latest 2,000 Base Sepolia blocks.") and the next step: "Search 10,000 blocks" and "Search by transaction". The coverage line stays visible.
+- **Filter with no matches:** names the query and offers "Clear filter".
+- **Confirmations:** one snackbar style (ink, compact, floating) and one phrasing: "Evidence copied", "Case link copied", "Demo wallet address copied", "Transaction JSON copied".
+- **Focus:** buttons and links draw a ring on keyboard focus. Rows and tabs take a neutral wash on hover and a stronger one on focus, and open with Enter.
 
 ### Mobile (390 px portrait)
 
-The top bar wraps to two lines and the form stacks. Tabs scroll horizontally and never wrap. Rows are two lines. The inspector opens as a full-width white sheet. No layout requires turning the phone sideways.
+The top bar wraps to two lines and the form stacks. Tabs scroll horizontally and never wrap. Rows are two lines. The inspector opens as a full-width white sheet under a pinned "All transfers" back bar. Links, tabs, buttons and the filter are at least 44 px tall, and the page keeps 32 px clear below the last row. No layout requires turning the phone sideways.
+
+### Browser tab
+
+The page title is "Rebound". The favicon, home-screen icons and loading mark are a plain white R on an ink square (`assets/favicon.png`, `assets/icons/`), and `assets/manifest.json` sets the browser theme to ink.
 
 ## Removed
 

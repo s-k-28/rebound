@@ -601,3 +601,230 @@ def test_page_can_render_each_example_detail_and_narrow_layout():
     assert app.narrow is True
     assert app.state.prepared is None
     assert len(page.controls) == 1
+
+
+@pytest.mark.parametrize("mode,search,end_block,expected", [
+    ("wallet", "", "", "Enter a wallet address."),
+    ("wallet", "0x1234", "", "Enter the full wallet address: 0x followed by 40 hex characters."),
+    ("wallet", "0x" + "11" * 20, "", ""),
+    ("wallet", " 0x" + "AB" * 20 + " ", "", ""),
+    ("wallet", "0x" + "11" * 20, "61,175,721", "Use digits only for the end block."),
+    ("wallet", "0x" + "11" * 20, "٦١", "Use digits only for the end block."),
+    ("stream", "0x" + "11" * 20, "abc", ""),
+    ("transaction", "", "", "Paste a Base Sepolia transaction hash."),
+    ("transaction", "0xabc", "", "Enter the full transaction hash: 0x followed by 64 hex characters."),
+    ("transaction", "0x" + "aa" * 32, "", ""),
+])
+def test_lookup_error_matches_the_service_validators(mode, search, end_block, expected):
+    assert ui.lookup_error(mode, search, end_block) == expected
+    if not expected and mode == "transaction":
+        assert protocol.hash32(search.strip())
+    elif not expected:
+        assert protocol.address(search.strip())
+
+
+def test_scan_status_names_the_exact_range_or_target():
+    wallet = "0x395809d8da4a70145d5060448070a15367df722c"
+    assert ui.block_window(200, "61175721") == (61_175_522, 61_175_721)
+    assert ui.block_window(2000, "") is None
+    assert ui.block_window(2000, "100") == (0, 100)
+    assert ui.scan_status_line("wallet", wallet, 200, "61175721") == (
+        "Scanning Base Sepolia blocks 61,175,522–61,175,721 for 0x3958…722c")
+    assert ui.scan_status_line("wallet", wallet, 2000) == "Scanning the latest 2,000 Base Sepolia blocks for 0x3958…722c"
+    assert ui.scan_status_line("transaction", "0x9064" + "0" * 56 + "50b5", 2000) == (
+        "Checking Base Sepolia transaction 0x9064…50b5")
+    assert ui.scan_status_line("stream", wallet, 2000) == "Searching the Stream index for 0x3958…722c"
+
+
+def test_empty_result_names_what_was_searched_and_offers_a_wider_window():
+    assert ui.empty_result_message("wallet", 200, "61175721") == (
+        "No supported transfers in Base Sepolia blocks 61,175,522–61,175,721.")
+    assert ui.empty_result_message("wallet", 2000) == "No supported transfers in the latest 2,000 Base Sepolia blocks."
+    assert "original Base Sepolia burn" in ui.empty_result_message("transaction", 2000)
+    assert "Stream index" in ui.empty_result_message("stream", 2000)
+    assert [ui.wider_window(size) for size in ui.HISTORY_WINDOWS] == [2000, 10_000, 50_000, None]
+    assert ui.filter_empty_message("completed", "") == "No completed transfers in this lookup."
+    assert ui.filter_empty_message("all", "  zzz ") == "No transfers in this view match “zzz”."
+    assert ui.filter_empty_message("all", "x" * 40).endswith("…”.")
+
+
+async def test_invalid_input_stays_at_the_field_and_keeps_current_results(monkeypatch):
+    class NoNetwork:
+        async def scan(self, *_args, **_kwargs):
+            raise AssertionError("an invalid address must not reach the service")
+
+        async def inspect_transaction(self, *_args, **_kwargs):
+            raise AssertionError("an invalid hash must not reach the service")
+
+    app = ui.InboxUI(object(), NoNetwork())
+    monkeypatch.setattr(app, "render", lambda: None)
+    app.state.load_examples()
+    app.wallet_input.value = "0x1234"
+    await app.scan()
+    assert app.input_error.startswith("Enter the full wallet address")
+    assert app.input_error_field is app.wallet_input
+    assert app.state.example and len(app.state.transfers) == 4 and not app.state.busy
+    app.sync_input_error()
+    assert app.input_error_text.visible and app.wallet_input.border_color == ui.RED
+    app.input_changed()
+    assert app.input_error == "" and not app.input_error_text.visible
+    app.wallet_input.value = "0x1234"
+    await app.scan()
+    # A handler that replaces the value (here: the examples button) takes the stale message with it.
+    app.wallet_input.value = ui.EXAMPLE_WALLET
+    app.sync_input_error()
+    assert not app.input_error_text.visible
+    app.show_transaction = True
+    app.tx_input.value = "0xabc"
+    await app.inspect_transaction()
+    assert app.input_error_field is app.tx_input and app.state.example
+
+
+async def test_loading_frame_never_shows_the_previous_lookup(monkeypatch):
+    started, finish = asyncio.Event(), asyncio.Event()
+
+    class SlowScan:
+        async def scan(self, wallet, *, blocks, end_block):
+            started.set()
+            await finish.wait()
+            return {"transfers": [], "coverage": "Base Sepolia blocks 61,175,522–61,175,721 (fixed range)."}
+
+    app = ui.InboxUI(SimpleNamespace(width=1440), SlowScan())
+    monkeypatch.setattr(app, "render", lambda: None)
+    app.state.load_examples()
+    app.state.error = "stale"
+    pending = asyncio.create_task(app.live_sample())
+    await started.wait()
+    assert app.state.busy and not app.has_records
+    loading = app.ledger_content()
+    assert len(loading.controls) == 1
+    lines = [control.value for control in loading.controls[0].content.controls]
+    assert lines[0] == "Scanning Base Sepolia blocks 61,175,522–61,175,721 for 0x3958…722c"
+    finish.set()
+    await pending
+    # A zero-result lookup shows no tabs, no zero counts and no filter.
+    assert app.state.scanned and app.state.transfers == [] and not app.has_records
+    assert app.inbox().content.controls[0] is app.ledger_host
+
+
+async def test_retry_and_widen_rerun_the_last_lookup(monkeypatch):
+    calls = []
+
+    class Recording:
+        async def scan(self, wallet, *, blocks, **options):
+            calls.append((wallet, blocks, options))
+            if len(calls) == 1:
+                raise ui.UpstreamError("Base Sepolia RPC is unavailable. Retry or configure another RPC.")
+            return {"transfers": [], "coverage": "", "from_block": 1, "to_block": blocks}
+
+    app = ui.InboxUI(object(), Recording())
+    monkeypatch.setattr(app, "render", lambda: None)
+    app.wallet_input.value = "0x" + "11" * 20
+    await app.scan()
+    assert app.state.error.startswith("Base Sepolia RPC is unavailable")
+    await app.retry()
+    assert app.state.error == "" and app.state.scanned
+    await app.widen()
+    assert [blocks for _, blocks, _ in calls] == [2000, 2000, 10_000]
+    assert app.history.value == "10000" and app.last_lookup["blocks"] == 10_000
+
+
+async def test_retry_and_widen_keep_the_submitted_utc_window(monkeypatch):
+    calls = []
+
+    class Recording:
+        async def scan(self, wallet, *, blocks, **options):
+            calls.append((wallet, blocks, options))
+            return {"transfers": [], "coverage": "Resolved UTC window"}
+
+    wallet = "0x" + "11" * 20
+    anchor = "2026-11-20 06:44"
+    app = ui.InboxUI(object(), Recording())
+    monkeypatch.setattr(app, "render", lambda: None)
+    app.wallet_input.value = wallet
+    app.history_ending.value = "time"
+    app.end_time.value = anchor
+    await app.scan()
+    assert app.lookup_line() == "Resolving the UTC cutoff for 0x1111…1111"
+
+    app.wallet_input.value = "0x" + "22" * 20
+    app.history_ending.value = "block"
+    app.end_block.value = "42"
+    await app.retry()
+    app.end_time.value = "2026-11-21 00:00"
+    await app.widen()
+    assert calls == [(wallet, blocks, {"end_time": anchor}) for blocks in (2000, 2000, 10_000)]
+
+
+async def test_invalid_hidden_block_opens_history_options(monkeypatch):
+    app = ui.InboxUI(object(), RecordingService())
+    monkeypatch.setattr(app, "render", lambda: None)
+    app.wallet_input.value = "0x" + "11" * 20
+    app.history_ending.value = "block"
+    app.end_block.value = "bad-block"
+
+    await app.scan()
+    assert app.show_history and app.input_error_field is app.end_block
+    assert app.input_error_text.visible and not app.state.error
+    assert app.input_error_notice.visible and app.input_error_notice.live_region
+
+
+def test_clear_filter_restores_every_transfer(monkeypatch):
+    app = ui.InboxUI(object(), RecordingService())
+    monkeypatch.setattr(app, "render", lambda: None)
+    app.state.load_examples()
+    app.state.filter, app.state.query = "completed", "zzz"
+    assert app.state.visible_transfers() == []
+    app.clear_filter()
+    assert len(app.state.visible_transfers()) == 4 and app.search_input.value == ""
+
+
+def test_snackbars_share_one_style_and_phone_controls_meet_tap_size():
+    class Page:
+        width = 390
+
+        def __init__(self):
+            self.dialogs = []
+
+        def show_dialog(self, dialog):
+            self.dialogs.append(dialog)
+
+    page = Page()
+    app = ui.InboxUI(page, RecordingService())
+    app.notify("Evidence copied")
+    snack, = page.dialogs
+    assert snack.bgcolor == ui.INK and snack.behavior == ui.ft.SnackBarBehavior.FLOATING
+    assert snack.content.value == "Evidence copied"
+    assert app.link("History options").height == 44
+    assert app.button("Refresh this transfer").height == 44
+    page.width = 1440
+    assert app.link("History options").height == 30
+    assert app.button("Refresh this transfer").height == 40
+
+
+def test_phone_sheet_pins_the_back_bar_above_the_scrolling_details():
+    class Page:
+        width = 390
+
+        def __init__(self):
+            self.controls, self.services = [], []
+
+        def add(self, control):
+            self.controls.append(control)
+
+        def update(self):
+            pass
+
+        def run_task(self, _handler, *_args):
+            pass
+
+    app = ui.InboxUI(Page(), RecordingService())
+    app.install()
+    app.examples()
+    app.inspect(app.state.transfers[0])
+    sheet = app.body_host.content
+    back, scroll = sheet.controls
+    assert scroll is app.workspace_view and app.inspector_host in scroll.controls
+    assert back.content.controls[0].content == "All transfers"
+    app.back()
+    assert app.body_host.content is app.workspace_view

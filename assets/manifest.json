@@ -1,0 +1,35 @@
+{
+  "name": "Rebound",
+  "short_name": "Rebound",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#F3F4F2",
+  "theme_color": "#141A17",
+  "description": "Find and finish interrupted USDC transfers.",
+  "orientation": "natural",
+  "prefer_related_applications": false,
+  "icons": [
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    },
+    {
+      "src": "icons/icon-maskable-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "icons/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
