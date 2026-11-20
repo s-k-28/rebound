@@ -25,6 +25,8 @@ class Settings:
     database: str = "data/rebound.sqlite3"
     stream_secret: str = ""
     stream_security_token: str = ""
+    # Off until a real wallet-extension run on a funded throwaway account passes.
+    browser_wallet: bool = False
 
     def __post_init__(self):
         for endpoint in (self.base_rpc, self.arc_rpc, self.circle_url):
@@ -41,6 +43,7 @@ class Settings:
             database=os.getenv("REBOUND_DB", cls.database),
             stream_secret=os.getenv("REBOUND_STREAM_SECRET", ""),
             stream_security_token=os.getenv("REBOUND_STREAM_SECURITY_TOKEN", ""),
+            browser_wallet=os.getenv("REBOUND_BROWSER_WALLET") == "1",
         )
 
     @property

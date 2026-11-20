@@ -67,7 +67,8 @@ def create_app(recovery: RecoveryService | None = None, *, include_ui: bool = Tr
     @api.get("/api/health")
     async def health():
         return {"status": "ok", "network": "testnet", "route": "Base Sepolia → Arc Testnet",
-                "signing": "local CLI or browser wallet; never server-side", "upstreams": "not checked by this endpoint",
+                "signing": "local CLI or browser wallet; never server-side" if recovery.settings.browser_wallet
+                else "local CLI only", "upstreams": "not checked by this endpoint",
                 "stream_enabled": recovery.settings.stream_enabled}
 
     @api.get("/api/ready")
@@ -187,7 +188,8 @@ def create_app(recovery: RecoveryService | None = None, *, include_ui: bool = Tr
         except (ValueError, TypeError, RecursionError) as exc:
             raise HTTPException(400, "Invalid Stream event payload.") from exc
 
-    api.include_router(wallet_router)  # Must precede the Flet mount at "/".
+    if recovery.settings.browser_wallet:
+        api.include_router(wallet_router)  # Must precede the Flet mount at "/".
     if include_ui:
         from rebound.ui import build_main
         api.mount("/", flet_fastapi.app(build_main(recovery), app_name="Rebound",

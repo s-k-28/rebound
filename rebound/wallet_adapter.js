@@ -2,22 +2,27 @@
 // EIP-1193 adapter for one Rebound wallet session. The review and approval happen
 // in the Flet UI; this script only connects the wallet, hands it the transaction
 // the server stored for this session, and reports the outcome. CONFIG is injected
-// by rebound/wallet.py from rebound/protocol.py.
+// by rebound/wallet.py from rebound/protocol.py. The session id never appears in a
+// URL: the page opens with a one-time code in its fragment, and the id it is traded
+// for lives only in this script's memory and a request header.
 (() => {
   const status = document.getElementById("status");
   const say = (text) => { status.textContent = text; };
-  const api = `/api/wallet-sessions/${CONFIG.session}`;
+  const api = "/api/wallet-session";
   const FIELDS = ["chainId", "data", "from", "gas", "maxFeePerGas", "maxPriorityFeePerGas", "to", "value"];
   const QUANTITY = /^0x(0|[1-9a-f][0-9a-f]*)$/;
   let provider = null;
+  let token = null;
   let account = null;
   let claimed = false;
   let stopped = false;
 
   async function call(path, body) {
-    const options = { method: body === undefined ? "GET" : "POST", cache: "no-store", credentials: "omit" };
+    const options = { method: body === undefined ? "GET" : "POST", cache: "no-store", credentials: "omit",
+      headers: {} };
+    if (token) options.headers[CONFIG.header] = token;
     if (body !== undefined) {
-      options.headers = { "Content-Type": "application/json" };
+      options.headers["Content-Type"] = "application/json";
       options.body = JSON.stringify(body);
     }
     const response = await fetch(api + path, options);
@@ -141,10 +146,13 @@
       return false;
     }
     say("Confirm the transaction in your wallet.");
+    // Keep telling Rebound this tab is alive while the wallet shows the confirmation.
+    const heartbeat = setInterval(() => { call("").catch(() => {}); }, 5000);
     let hash;
     try {
       hash = await provider.request({ method: "eth_sendTransaction", params: [request] });
     } catch (error) {
+      clearInterval(heartbeat);
       if (error && error.code === 4001 && await report({ outcome: "rejected" })) {
         say("You rejected the request. Nothing was sent. Return to the Rebound tab.");
         claimed = false;
@@ -154,6 +162,7 @@
       say("The wallet did not confirm the outcome. Do not send again. Return to the Rebound tab.");
       return false;
     }
+    clearInterval(heartbeat);
     if (typeof hash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(hash)) {
       await report({ outcome: "unknown", code: null });
       say("The wallet returned no transaction hash. Do not send again. Return to the Rebound tab.");
@@ -196,7 +205,21 @@
     }
   }
 
+  async function pickUp() {
+    const code = String(window.location.hash || "").slice(1);
+    // Drop the code from the address bar and history; it works only once anyway.
+    window.history.replaceState(null, "", window.location.pathname);
+    if (!/^[A-Za-z0-9_-]{22}$/.test(code)) throw new Error("This wallet link is incomplete. Open it again from Rebound.");
+    token = (await call("/exchange", { code })).token;
+  }
+
   async function start() {
+    try {
+      await pickUp();
+    } catch (error) {
+      say(String(error.message || error).slice(0, 160));
+      return;
+    }
     provider = await waitForProvider();
     if (!provider || typeof provider.request !== "function") {
       say("No browser wallet was found. Install or unlock one, then reload this tab.");

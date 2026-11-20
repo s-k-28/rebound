@@ -2,16 +2,22 @@
 
 The review and status UI is Flet (rebound/wallet_ui.py). Injected EIP-1193 wallets
 are reachable only from page JavaScript, so this router serves one minimal adapter
-page (a status line plus rebound/wallet_adapter.js) and the four session calls it
-needs. Sessions are created in-process by the Flet UI; there is no public create
-endpoint. No key reaches the server.
+page (a status line plus rebound/wallet_adapter.js) and the session calls it needs.
+Sessions are created in-process by the Flet UI; there is no public create endpoint.
+No key reaches the server.
+
+No secret is ever in a request path or query string, so none reaches access logs.
+The page URL carries a one-time code in its fragment (never sent to the server);
+the script trades it in a POST body for the session id and sends that id in the
+X-Rebound-Wallet-Session header. The router is mounted only when
+REBOUND_BROWSER_WALLET=1.
 """
 import json
 import secrets
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
@@ -44,8 +50,13 @@ PAGE = """<!doctype html>
 </html>
 """
 NO_STORE = {"Cache-Control": "no-store"}
+SESSION_HEADER = "X-Rebound-Wallet-Session"
 
 router = APIRouter(include_in_schema=False)
+
+
+class Code(BaseModel):
+    code: str = Field(pattern=r"^[A-Za-z0-9_-]{22}$")
 
 
 class Connected(BaseModel):
@@ -73,9 +84,9 @@ def security_headers(nonce: str) -> dict[str, str]:
             "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"}
 
 
-def render_adapter(session_id: str, nonce: str) -> str:
+def render_adapter(nonce: str) -> str:
     config = {
-        "session": session_id, "transmitter": p.TRANSMITTER, "chainHex": ARC_CHAIN_HEX,
+        "header": SESSION_HEADER, "transmitter": p.TRANSMITTER, "chainHex": ARC_CHAIN_HEX,
         "selector": "0x" + p.RECEIVE_SELECTOR.hex(), "rpc": ARC_PUBLIC_RPC, "explorer": p.ARC_EXPLORER,
         "maxGas": str(MAX_GAS_LIMIT), "maxNetworkFee": str(MAX_NETWORK_FEE_WEI),
     }
@@ -88,11 +99,16 @@ def manager(request: Request):
     return sessions_for(request.app.state.recovery)
 
 
+Token = Annotated[str, Header(alias=SESSION_HEADER)]
+
+
 def session_or_404(request: Request, session_id: str):
     try:
-        return manager(request).get(session_id)
+        session = manager(request).get(session_id)
     except SessionNotFound as exc:
         raise HTTPException(404, str(exc)) from exc
+    manager(request).touch(session)
+    return session
 
 
 async def guarded(operation):
@@ -106,37 +122,50 @@ async def guarded(operation):
         raise HTTPException(400, str(exc)) from exc
 
 
-@router.get("/wallet/adapter/{session_id}", response_class=HTMLResponse)
-async def adapter_page(request: Request, session_id: str):
-    session = session_or_404(request, session_id)
+@router.get("/wallet/adapter", response_class=HTMLResponse)
+async def adapter_page():
     nonce = secrets.token_urlsafe(18)
-    return HTMLResponse(render_adapter(session.id, nonce), headers=security_headers(nonce))
+    return HTMLResponse(render_adapter(nonce), headers=security_headers(nonce))
 
 
-@router.get("/api/wallet-sessions/{session_id}")
-async def session_state(request: Request, session_id: str):
-    return JSONResponse(session_or_404(request, session_id).adapter_view(), headers=NO_STORE)
-
-
-@router.post("/api/wallet-sessions/{session_id}/connected")
-async def connected(request: Request, session_id: str, payload: Connected):
+@router.post("/api/wallet-session/exchange")
+async def exchange(request: Request, payload: Code):
     async def run():
-        return await manager(request).connect(session_id, payload.account, payload.chainId)
+        return manager(request).exchange(payload.code)
+    session = await guarded(run)
+    return JSONResponse({"token": session.id, **session.adapter_view()}, headers=NO_STORE)
+
+
+@router.get("/api/wallet-session")
+async def session_state(request: Request, token: Token):
+    return JSONResponse(session_or_404(request, token).adapter_view(), headers=NO_STORE)
+
+
+@router.post("/api/wallet-session/connected")
+async def connected(request: Request, payload: Connected, token: Token):
+    session_or_404(request, token)
+
+    async def run():
+        return await manager(request).connect(token, payload.account, payload.chainId)
     session = await guarded(run)
     return JSONResponse(session.adapter_view(), headers=NO_STORE)
 
 
-@router.post("/api/wallet-sessions/{session_id}/claim")
-async def claim(request: Request, session_id: str):
+@router.post("/api/wallet-session/claim")
+async def claim(request: Request, token: Token):
+    session_or_404(request, token)
+
     async def run():
-        return manager(request).claim(session_id)
+        return manager(request).claim(token)
     return JSONResponse(await guarded(run), headers=NO_STORE)
 
 
-@router.post("/api/wallet-sessions/{session_id}/result")
-async def result(request: Request, session_id: str, payload: Outcome):
+@router.post("/api/wallet-session/result")
+async def result(request: Request, payload: Outcome, token: Token):
+    session_or_404(request, token)
+
     async def run():
-        return manager(request).report(session_id, payload.outcome, tx_hash=payload.hash,
+        return manager(request).report(token, payload.outcome, tx_hash=payload.hash,
                                        reason=payload.reason, code=payload.code)
     session = await guarded(run)
     return JSONResponse(session.adapter_view(), headers=NO_STORE)
