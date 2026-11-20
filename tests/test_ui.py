@@ -164,6 +164,42 @@ def test_filter_change_drops_evidence_for_a_hidden_transfer(monkeypatch):
     assert app.state.selected is None
 
 
+@pytest.mark.parametrize("width,expected_scroll", [(390, "workspace"), (900, "workspace"), (1440, "inspector")])
+async def test_selecting_transfer_starts_at_the_top_of_its_details(monkeypatch, width, expected_scroll):
+    class Page:
+        pass
+
+    page = Page()
+    page.width = width
+    app = ui.InboxUI(page, RecordingService())
+    item = {"key": "selected-transfer"}
+    app.state.selected = item
+    scrolled = []
+
+    async def workspace_scroll(**kwargs):
+        scrolled.append(("workspace", kwargs))
+
+    async def inspector_scroll(**kwargs):
+        scrolled.append(("inspector", kwargs))
+
+    monkeypatch.setattr(app.workspace_view, "scroll_to", workspace_scroll)
+    monkeypatch.setattr(app.inspector_scroll, "scroll_to", inspector_scroll)
+    await app.finish_inspector_reveal(item)
+    assert scrolled == [(expected_scroll, {"offset": 0, "duration": 0})]
+
+
+async def test_obsolete_selection_does_not_scroll_the_current_view(monkeypatch):
+    class Page:
+        width = 390
+
+    app = ui.InboxUI(Page(), RecordingService())
+    app.state.selected = {"key": "new-transfer"}
+    async def forbidden_scroll(**_kwargs):
+        raise AssertionError("An old reveal must not scroll the user's new selection")
+    monkeypatch.setattr(app.workspace_view, "scroll_to", forbidden_scroll)
+    await app.finish_inspector_reveal({"key": "old-transfer"})
+
+
 async def test_example_cannot_prepare_even_if_action_is_called_directly():
     state = ui.InboxState()
     state.load_examples()

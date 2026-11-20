@@ -982,8 +982,9 @@ class InboxUI:
             self.inspector_host.animate_opacity = ft.Animation(180, ft.AnimationCurve.EASE_OUT_CUBIC)
             self.inspector_host.opacity = 1
             self.inspector_host.update()
-        if self.split_workspace and self.state.selected is item:
-            await self.inspector_scroll.scroll_to(offset=0, duration=0)
+        if self.state.selected is item:
+            detail_scroll = self.inspector_scroll if self.split_workspace else self.workspace_view
+            await detail_scroll.scroll_to(offset=0, duration=0)
 
     def back(self, _=None) -> None:
         self.state.selected = None
