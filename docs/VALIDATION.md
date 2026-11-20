@@ -49,4 +49,4 @@ The read-only replay verified an unused nonce and a successful simulation at Arc
 
 The Python/Flet app was opened in Chrome and its actual rendering inspected at desktop and 390px widths. Browser checks caught an invalid expanded control inside a wrapping layout and search losing keyboard focus; both were fixed. Example selection, completed-status filtering, sequential multi-character search and clearing a hidden inspector were exercised against the running app. Search retained focus between separate `4` and `2` keystrokes and correctly showed only the 42-USDC example.
 
-Container instructions and a non-root Dockerfile are provided. The local Docker daemon was unavailable, so the image was not built or run in this session. The Python app itself was started and tested directly with Uvicorn.
+Container instructions and a non-root Dockerfile are provided. On November 20 the image was built and run from a fresh clone: `/api/health` and `/api/ready` returned 200, `/` and `/demo` loaded, the process ran as uid 10001, and `PORT=10000` was honoured.
