@@ -23,10 +23,9 @@ from rebound.protocol import (
     address,
     decode_receive_calldata,
     hash32,
-    matches_mint_receipt,
     usdc,
 )
-from rebound.service import arc_gas_quote
+from rebound.service import arc_gas_quote, verify_arc_mint_receipt
 from rebound.terminal import read_hidden_key
 
 ARC_CHAIN_ID = 5042002
@@ -178,9 +177,9 @@ async def recover_transfer(
         if (
             str(receipt.get("to", "")).lower() != TRANSMITTER
             or str(receipt.get("from", "")).lower() != caller
-            or not matches_mint_receipt(receipt, local_hash, raw_message, message)
+            or not await verify_arc_mint_receipt(service.arc, receipt, local_hash, raw_message, message)
         ):
-            emit("Receipt confirmed but the expected mint event was not verified. Inspect the transaction.")
+            emit("Could not verify the canonical Arc mint receipt. Inspect the submitted hash before another attempt.")
             return {"status": "receipt_unverified", "tx_hash": local_hash, "receipt": receipt}
         emit(f"Destination mint confirmed: https://explorer.testnet.arc.io/tx/{local_hash}")
         return {"status": "completed", "tx_hash": local_hash, "receipt": receipt, "nonce": message.nonce}

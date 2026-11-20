@@ -17,6 +17,7 @@ KEY = "0x" + "01" * 32
 CALLER = Account.from_key(KEY).address.lower()
 TX_HASH = "0x" + "cd" * 32
 NONCE = "0x" + "ab" * 32
+ARC_BLOCK_HASH = "0x" + "ef" * 32
 
 
 class FakeArc:
@@ -27,6 +28,7 @@ class FakeArc:
         self.uncertain = uncertain
         self.broadcasts = []
         self.receipt_body = bytes.fromhex(message_hex()[2:])[148:]
+        self.canonical_block_hash = ARC_BLOCK_HASH
 
     async def call(self, method, params=None):
         if method == "eth_chainId":
@@ -53,6 +55,8 @@ class FakeArc:
                 "to": TRANSMITTER,
                 "from": CALLER,
                 "blockNumber": "0x123",
+                "blockHash": ARC_BLOCK_HASH,
+                "transactionIndex": "0x0",
                 "logs": [
                     {
                         "address": TRANSMITTER,
@@ -67,6 +71,10 @@ class FakeArc:
                     }
                 ],
             }
+        if method == "eth_getBlockByNumber":
+            assert params == ["0x123", False]
+            return {"number": "0x123", "hash": self.canonical_block_hash,
+                    "transactions": ["0x" + keccak(self.broadcasts[-1]).hex()]}
         raise AssertionError(method)
 
 
@@ -191,6 +199,16 @@ async def test_valid_recovery_signs_once_and_reports_confirmed_receipt():
     assert len(service.arc.broadcasts) == 1
     assert service.preparations == 2
     assert all(KEY not in line for line in output)
+
+
+async def test_recovery_only_reports_completion_for_a_canonical_receipt():
+    service = FakeService()
+    service.arc.canonical_block_hash = "0x" + "a1" * 32
+    result, output = await run_recovery(service)
+    assert result["status"] == "receipt_unverified"
+    assert result["tx_hash"] == "0x" + keccak(service.arc.broadcasts[0]).hex()
+    assert len(service.arc.broadcasts) == 1
+    assert any("Could not verify the canonical Arc mint receipt" in line for line in output)
 
 
 async def test_receipt_deadline_preserves_signed_hash_without_resending(monkeypatch):

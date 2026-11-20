@@ -127,6 +127,50 @@ async def arc_gas_quote(rpc: Rpc, caller: str, gas_limit: int, *, block: str = "
     return ArcGasQuote(price, gas_limit, quantity(balance))
 
 
+async def verify_arc_mint_receipt(rpc: Rpc, receipt: object, tx_hash: str, raw: str, message: p.Message) -> bool:
+    """Match a mint to its canonical Arc block and original attested message."""
+    if not isinstance(receipt, dict) or not p.matches_mint_receipt(receipt, tx_hash, raw, message):
+        return False
+    try:
+        block_number = quantity(receipt.get("blockNumber"))
+        block_hash = p.hash32(receipt.get("blockHash"))
+        block = await rpc.call("eth_getBlockByNumber", [hex(block_number), False])
+        if (not isinstance(block, dict) or p.hash32(block.get("hash")) != block_hash
+                or quantity(block.get("number")) != block_number):
+            return False
+        transaction_index = quantity(receipt["transactionIndex"]) if "transactionIndex" in receipt else None
+        transactions = block.get("transactions")
+        if not isinstance(transactions, list):
+            return False
+        hashes = [p.hash32(value) for value in transactions]
+        if transaction_index is None:
+            if tx_hash not in hashes:
+                return False
+        elif transaction_index >= len(hashes) or hashes[transaction_index] != tx_hash:
+            return False
+    except (ValueError, UpstreamError):
+        return False
+
+    # Some providers omit redundant log fields. If present, they must agree with the receipt.
+    linked_logs = []
+    for log in receipt["logs"]:
+        if not isinstance(log, dict):
+            continue
+        try:
+            if any(field in log and p.hash32(log[field]) != expected for field, expected in (
+                ("transactionHash", tx_hash), ("blockHash", block_hash),
+            )):
+                continue
+            if "blockNumber" in log and quantity(log["blockNumber"]) != block_number:
+                continue
+            if "transactionIndex" in log and quantity(log["transactionIndex"]) != transaction_index:
+                continue
+        except (ValueError, UpstreamError):
+            continue
+        linked_logs.append(log)
+    return p.matches_mint_receipt(receipt | {"logs": linked_logs}, tx_hash, raw, message)
+
+
 class RecoveryService:
     def __init__(self, settings: Settings, client: httpx.AsyncClient):
         self.settings = settings
@@ -415,48 +459,9 @@ class RecoveryService:
         try:
             tx_hash = p.hash32(hint)
             receipt = await self.arc.call("eth_getTransactionReceipt", [tx_hash])
-            if not p.matches_mint_receipt(receipt, tx_hash, attestation.raw, attestation.message):
-                return None
-            block_number = quantity(receipt.get("blockNumber"))
-            block_hash = p.hash32(receipt.get("blockHash"))
-            block = await self.arc.call("eth_getBlockByNumber", [hex(block_number), False])
-            if (not isinstance(block, dict) or p.hash32(block.get("hash")) != block_hash
-                    or quantity(block.get("number")) != block_number):
-                return None
-            transaction_index = quantity(receipt["transactionIndex"]) if "transactionIndex" in receipt else None
-            transactions = block.get("transactions")
-            if not isinstance(transactions, list):
-                return None
-            hashes = [p.hash32(value) for value in transactions]
-            if transaction_index is None:
-                if tx_hash not in hashes:
-                    return None
-            elif transaction_index >= len(hashes) or hashes[transaction_index] != tx_hash:
-                return None
-
-            # Some RPCs omit redundant log metadata. When supplied, it must bind
-            # the matching MessageReceived event to this exact receipt and block.
-            linked_logs = []
-            for log in receipt["logs"]:
-                if not isinstance(log, dict):
-                    continue
-                try:
-                    if any(field in log and p.hash32(log[field]) != expected for field, expected in (
-                        ("transactionHash", tx_hash), ("blockHash", block_hash),
-                    )):
-                        continue
-                    if "blockNumber" in log and quantity(log["blockNumber"]) != block_number:
-                        continue
-                    if "transactionIndex" in log and quantity(log["transactionIndex"]) != transaction_index:
-                        continue
-                except (ValueError, UpstreamError):
-                    continue
-                linked_logs.append(log)
-            if p.matches_mint_receipt(receipt | {"logs": linked_logs}, tx_hash, attestation.raw, attestation.message):
-                return receipt
         except (ValueError, UpstreamError):
             return None
-        return None
+        return receipt if await verify_arc_mint_receipt(self.arc, receipt, tx_hash, attestation.raw, attestation.message) else None
 
     async def _verified_arc_receipt(self, burn: p.Burn, attestation: Attestation) -> dict | None:
         hint = attestation.receipt_hint
