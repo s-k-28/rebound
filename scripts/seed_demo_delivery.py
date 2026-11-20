@@ -4,8 +4,8 @@ Usage: REBOUND_STREAM_SECRET=... uv run python scripts/seed_demo_delivery.py [BA
 
 This lets the QuickNode walkthrough show a wallet-only discovery when no live Stream is
 delivering. It posts with the local shared secret, never a QuickNode signature, so the app
-labels the result "Stream endpoint (no QuickNode signature)". It is not a QuickNode
-delivery and must not be described as one.
+labels the delivery "Shared-secret adapter payload" and states that provider delivery is
+unverified. It is not a QuickNode delivery and must not be described as one.
 
 Reads the public receipt of the controlled run in docs/LIVE-RECOVERY.md from Base Sepolia.
 Exit 0: delivered; 1: the receipt or the endpoint failed; 2: bad arguments or no secret.
