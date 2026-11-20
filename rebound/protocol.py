@@ -48,9 +48,9 @@ def evm_word(value: bytes) -> str:
     return "0x" + value[12:].hex()
 
 
-def usdc(amount: int) -> str:
-    whole, fraction = divmod(amount, 1_000_000)
-    return f"{whole}.{fraction:06d}".rstrip("0") if fraction else str(whole)
+def usdc(amount: int, *, decimals: int = 6) -> str:
+    whole, fraction = divmod(amount, 10**decimals)
+    return f"{whole}.{fraction:0{decimals}d}".rstrip("0") if fraction else str(whole)
 
 
 @dataclass(frozen=True)

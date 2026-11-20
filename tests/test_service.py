@@ -54,6 +54,10 @@ def setup_service(tmp_path):
                 result = "0x" + (int(state["used"]) if not data.startswith("0x57ecfd28") else state.get("simulation", 1)).to_bytes(32, "big").hex()
             case "eth_estimateGas":
                 result = "0x30d40"
+            case "eth_gasPrice":
+                result = hex(10**9)
+            case "eth_getBalance":
+                result = hex(state.get("caller_balance", 10**18))
             case _:
                 raise AssertionError(f"Unexpected RPC method {method}")
         return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": result})
@@ -258,6 +262,16 @@ async def test_unsuccessful_destination_simulation_blocks_prepare(setup_service)
     state["simulation"] = 0
     with pytest.raises(ValueError, match="simulation"):
         await app.prepare("0x" + "cd" * 32, 3, WALLET)
+
+
+async def test_prepare_reports_arc_gas_in_native_usdc_units(setup_service):
+    app, state = setup_service
+    state["caller_balance"] = 40 * 10**12
+    prepared = await app.prepare("0x" + "cd" * 32, 3, WALLET)
+    assert prepared["fee"] == "0.0005"
+    assert prepared["gas_quote"] == {
+        "max_cost_usdc": "0.00024", "caller_balance_usdc": "0.00004", "shortfall_usdc": "0.0002",
+    }
 
 
 async def test_ingestion_is_only_discovery_and_duplicate_delivery_does_not_duplicate_transfers(setup_service):

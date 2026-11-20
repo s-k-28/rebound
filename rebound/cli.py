@@ -27,6 +27,7 @@ from rebound.protocol import (
     matches_mint_receipt,
     usdc,
 )
+from rebound.service import arc_gas_quote
 
 ARC_CHAIN_ID = 5042002
 
@@ -87,8 +88,10 @@ async def recover_transfer(
     tx, _, _ = validate_prepared(prepared, caller, tx_hash, log_index)
     if integer(await service.arc.call("eth_chainId")) != ARC_CHAIN_ID:
         raise ValueError("Configured destination RPC is not Arc Testnet.")
-    price = integer(await service.arc.call("eth_gasPrice"))
-    approved_fee = fee_in_usdc(integer(tx["gas"]), price, max_fee)
+    quote = await arc_gas_quote(service.arc, caller, integer(tx["gas"]), block="pending")
+    approved_fee = fee_in_usdc(quote.gas_limit, quote.price, max_fee)
+    if quote.shortfall:
+        raise ValueError(f"Caller needs {usdc(quote.shortfall, decimals=18)} more Arc Testnet USDC for gas.")
 
     emit("Testnet recovery: Base Sepolia → Arc Testnet (chain 5042002)")
     emit(f"Source burn: {tx_hash}, log {log_index}")
@@ -122,8 +125,10 @@ async def recover_transfer(
         raise ValueError("Transfer details changed after review. Inspect and approve it again.")
     if integer(await service.arc.call("eth_chainId")) != ARC_CHAIN_ID:
         raise ValueError("Destination RPC changed and is not Arc Testnet.")
-    latest_price = integer(await service.arc.call("eth_gasPrice"))
-    latest_fee = fee_in_usdc(integer(latest_tx["gas"]), latest_price, max_fee)
+    latest_quote = await arc_gas_quote(service.arc, caller, integer(latest_tx["gas"]), block="pending")
+    latest_fee = fee_in_usdc(latest_quote.gas_limit, latest_quote.price, max_fee)
+    if latest_quote.shortfall:
+        raise ValueError("Caller no longer has enough Arc Testnet USDC for the approved gas cost.")
     if latest_fee > approved_fee:
         raise ValueError("Estimated gas cost changed after review. Inspect and approve it again.")
     account_nonce = integer(await service.arc.call("eth_getTransactionCount", [caller, "pending"]))
@@ -134,7 +139,7 @@ async def recover_transfer(
             "to": bytes.fromhex(TRANSMITTER[2:]),
             "value": 0,
             "gas": integer(latest_tx["gas"]),
-            "gasPrice": latest_price,
+            "gasPrice": latest_quote.price,
             "data": latest_tx["data"],
         }
     )

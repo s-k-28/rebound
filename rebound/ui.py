@@ -48,8 +48,8 @@ def state_copy(status: str) -> tuple:
 def display_amount(value: str | None) -> str:
     if value is None:
         return "Not available yet"
-    amount = Decimal(value)
-    return f"{amount:,.2f}" if amount == amount.quantize(Decimal("0.01")) else f"{amount:,f}"
+    whole, _, fraction = f"{Decimal(value):,f}".partition(".")
+    return f"{whole}.{fraction.rstrip('0').ljust(2, '0')}"
 
 
 def shorten(value: str | None, size: int = 6) -> str:
@@ -715,6 +715,19 @@ class InboxUI:
         item = self.state.selected
         transaction = json.dumps(prepared["transaction"], indent=2)
         command = f"uv run python -m rebound.cli recover {item['tx_hash']} {item['log_index']} --caller {prepared['transaction']['from']}"
+        gas = prepared.get("gas_quote")
+        gas_controls = []
+        if gas:
+            gas_controls = [
+                self.value_line("Arc gas budget at current price", display_amount(gas["max_cost_usdc"]) + " testnet USDC"),
+                self.value_line("Caller’s Arc balance", display_amount(gas["caller_balance_usdc"]) + " testnet USDC"),
+            ]
+            if gas["shortfall_usdc"] != "0":
+                gas_controls.extend([
+                    self.text(f"Add {display_amount(gas['shortfall_usdc'])} testnet USDC to cover this gas budget.", 12, AMBER),
+                    ft.TextButton("Open Circle testnet faucet", url="https://faucet.circle.com/", icon=ft.Icons.OPEN_IN_NEW_ROUNDED),
+                ])
+
         async def copy(_):
             await self.clipboard.set(transaction)
         return self.panel(ft.Column([
@@ -723,6 +736,7 @@ class InboxUI:
             self.text("The source transfer, destination nonce and caller were rechecked, and the mint was simulated. This transaction has not been signed or sent.", 14, MUTED),
             self.value_line("Recipient", prepared.get("recipient", item["recipient"]), selectable=True),
             self.value_line("Destination amount", display_amount(prepared.get("net_amount")) + " USDC"),
+            *gas_controls,
             ft.TextField(value=transaction, read_only=True, multiline=True, min_lines=6, max_lines=10,
                          text_size=12, filled=True, fill_color="#F7F9FC", border_color=LINE),
             ft.Row([self.button("Copy transaction JSON", copy, icon=ft.Icons.CONTENT_COPY_ROUNDED)], wrap=True),

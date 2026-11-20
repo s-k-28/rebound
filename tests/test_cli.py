@@ -19,8 +19,9 @@ NONCE = "0x" + "ab" * 32
 
 
 class FakeArc:
-    def __init__(self, *, gas_price=10**9, chain_id=5042002, uncertain=False):
+    def __init__(self, *, gas_price=10**9, chain_id=5042002, uncertain=False, balance=10**18):
         self.gas_price = gas_price
+        self.balance = balance
         self.chain_id = chain_id
         self.uncertain = uncertain
         self.broadcasts = []
@@ -31,6 +32,9 @@ class FakeArc:
             return hex(self.chain_id)
         if method == "eth_gasPrice":
             return hex(self.gas_price)
+        if method == "eth_getBalance":
+            assert params == [CALLER, "pending"]
+            return hex(self.balance)
         if method == "eth_getTransactionCount":
             assert params == [CALLER, "pending"]
             return "0x0"
@@ -147,6 +151,18 @@ async def test_gas_fee_above_cap_never_broadcasts():
     service = FakeService(FakeArc(gas_price=10**12))
     with pytest.raises(ValueError, match="fee cap"):
         await run_recovery(service)
+    assert service.arc.broadcasts == []
+
+
+async def test_unfunded_arc_caller_is_rejected_before_key_entry():
+    service = FakeService(FakeArc(balance=0))
+
+    def forbidden_key(_prompt):
+        pytest.fail("A key was requested before checking the caller's balance")
+
+    with pytest.raises(ValueError, match="needs 0.0002 more Arc Testnet USDC"):
+        await cli.recover_transfer(service, TX_HASH, 3, CALLER, read_key=forbidden_key,
+                                   confirm=lambda _: "RECOVER", emit=lambda _: None)
     assert service.arc.broadcasts == []
 
 

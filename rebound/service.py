@@ -84,6 +84,31 @@ async def _gather_reads(*coroutines):
         raise
 
 
+@dataclass(frozen=True)
+class ArcGasQuote:
+    price: int
+    gas_limit: int
+    balance: int
+
+    @property
+    def maximum_cost(self) -> int:
+        return self.price * self.gas_limit
+
+    @property
+    def shortfall(self) -> int:
+        return max(0, self.maximum_cost - self.balance)
+
+
+async def arc_gas_quote(rpc: Rpc, caller: str, gas_limit: int, *, block: str = "latest") -> ArcGasQuote:
+    price, balance = await _gather_reads(
+        rpc.call("eth_gasPrice"), rpc.call("eth_getBalance", [caller, block]),
+    )
+    price = quantity(price)
+    if price <= 0:
+        raise UpstreamError("Arc returned an invalid gas price.")
+    return ArcGasQuote(price, gas_limit, quantity(balance))
+
+
 class RecoveryService:
     def __init__(self, settings: Settings, client: httpx.AsyncClient):
         self.settings = settings
@@ -405,11 +430,16 @@ class RecoveryService:
         gas = quantity(await self.arc.call("eth_estimateGas", [transaction]))
         if gas <= 0 or gas > 2_000_000:
             raise ValueError("Destination gas estimate is outside the allowed recovery bound.")
-        transaction["gas"] = hex((gas * 12 + 9) // 10)
+        gas_limit = (gas * 12 + 9) // 10
+        transaction["gas"] = hex(gas_limit)
+        quote = await arc_gas_quote(self.arc, caller, gas_limit)
         return {
             "transaction": transaction, "recipient": message.mint_recipient,
             "amount": p.usdc(message.amount), "net_amount": p.usdc(message.amount - message.fee),
             "fee": p.usdc(message.fee), "tx_hash": tx_hash, "log_index": log_index,
             "nonce": message.nonce,
+            "gas_quote": {"max_cost_usdc": p.usdc(quote.maximum_cost, decimals=18),
+                          "caller_balance_usdc": p.usdc(quote.balance, decimals=18),
+                          "shortfall_usdc": p.usdc(quote.shortfall, decimals=18)},
             "warning": "Arc Testnet only. This completes the original transfer to its fixed recipient. Simulation is not a guarantee; competing attempts may still consume gas.",
         }
