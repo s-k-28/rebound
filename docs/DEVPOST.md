@@ -75,5 +75,5 @@ Upload in this order. Images 1 to 5 and 7 use live testnet data. Image 6 is synt
 | Demo evidence | [Controlled recovery](LIVE-RECOVERY.md) and [independent read-only replay](VALIDATION.md#reproduce-the-read-only-check) |
 | Agent tools | [MCP server](MCP.md) |
 | Gallery | [Seven images with captions](images/devpost/README.md) |
-| Video | Pending verification |
-| QuickNode Streams | [Why and Stream record](QUICKNODE.md#why-this-stream). Live delivery pending |
+| Video | VIDEO_LINK_TBD |
+| Bounties | None claimed. QuickNode Streams adapter implemented ([why and Stream record](QUICKNODE.md#why-this-stream)); live delivery pending, so the bounty is not selected |
