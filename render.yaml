@@ -1,0 +1,12 @@
+# One-click public preview on Render: Dashboard → New → Blueprint → select this repository.
+# Uses the repository Dockerfile. Defaults point at public Base Sepolia, Arc Testnet and Circle sandbox endpoints.
+services:
+  - type: web
+    name: rebound
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health
+    autoDeployTrigger: commit
+    envVars:
+      - key: REBOUND_DB
+        value: /app/data/rebound.sqlite3
