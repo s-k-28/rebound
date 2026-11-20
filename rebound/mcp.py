@@ -40,6 +40,8 @@ META_SERVER = "io.modelcontextprotocol/serverInfo"
 PARSE_ERROR, INVALID_REQUEST, METHOD_NOT_FOUND, INVALID_PARAMS = -32700, -32600, -32601, -32602
 INTERNAL_ERROR, UNSUPPORTED_VERSION = -32603, -32022
 MAX_MESSAGE_BYTES = 1_000_000
+MAX_BUFFERED_LINES = 4
+MAX_INFLIGHT_CALLS = 8
 DEFAULT_CALL_TIMEOUT_SECONDS = 55.0  # Below the common 60-second client request timeout.
 SHUTDOWN_GRACE_SECONDS = 10.0
 LIST_TTL_MS = 300_000
@@ -528,6 +530,9 @@ class McpServer:
         if "id" not in message:
             self._notification(method, params)
             return
+        if request_id in self._inflight:
+            self._error(None, INVALID_REQUEST, "Request id is already in use.")
+            return
         try:
             result = await self._dispatch(request_id, method, params)
         except RpcError as exc:
@@ -565,15 +570,14 @@ class McpServer:
 
     async def _dispatch(self, request_id, method: str, params) -> dict | None:
         if method not in ("initialize", "ping", "server/discover", "tools/list", "tools/call"):
-            raise RpcError(METHOD_NOT_FOUND, f"Method not found: {method}")
+            raise RpcError(METHOD_NOT_FOUND, f"Method not found: {redact(method)[:80]}")
         if not isinstance(params, dict):
             raise RpcError(INVALID_PARAMS, "params must be an object.")
         if method == "initialize":
             return self._initialize(params)
         version = self._version(method, params)
         if method == "tools/call":
-            self._start_call(request_id, params, version)
-            return None
+            return self._start_call(request_id, params, version)
         if method == "tools/list":
             return self._finish({"tools": tool_definitions(version)}, version, cacheable=True)
         if method == "server/discover":
@@ -599,7 +603,7 @@ class McpServer:
                   "_meta": {META_SERVER: server_info(version)}}
         return result | {"ttlMs": LIST_TTL_MS, "cacheScope": "public"} if cacheable else result
 
-    def _start_call(self, request_id, params: dict, version: str) -> None:
+    def _start_call(self, request_id, params: dict, version: str) -> dict | None:
         name, arguments = params.get("name"), params.get("arguments")
         if not isinstance(name, str):
             raise RpcError(INVALID_PARAMS, "tools/call requires a string params.name.")
@@ -608,6 +612,8 @@ class McpServer:
         arguments = {} if arguments is None else arguments
         if not isinstance(arguments, dict):
             raise RpcError(INVALID_PARAMS, "tools/call params.arguments must be an object.")
+        if len(self._inflight) >= MAX_INFLIGHT_CALLS:
+            return self._finish(tool_error("Busy: too many pending tool calls. Retry shortly."), version)
         task = asyncio.create_task(self._run_call(request_id, name, arguments, version))
         self._inflight[request_id] = task
 
@@ -616,6 +622,7 @@ class McpServer:
                 del self._inflight[request_id]
 
         task.add_done_callback(forget)
+        return None
 
     async def _run_call(self, request_id, name: str, arguments: dict, version: str) -> None:
         try:
@@ -630,7 +637,8 @@ class McpServer:
     async def call_tool(self, name: str, arguments: dict, version: str = MODERN_VERSIONS[0]) -> dict:
         problems = schema_errors(TOOL_SPECS[name]["inputSchema"], arguments)
         if problems:
-            return tool_error(f"Invalid arguments: {'; '.join(problems)}. Nothing was checked or prepared.")
+            detail = redact("; ".join(problems[:5]))[:500]
+            return tool_error(f"Invalid arguments: {detail}. Nothing was checked or prepared.")
         started = time.monotonic()
         try:
             async with asyncio.timeout(self.call_timeout):
@@ -659,13 +667,22 @@ async def stdin_lines(stream=None) -> AsyncIterator[bytes]:
     """Yield stdin lines from a daemon thread, which works for pipes, files and terminals alike."""
     stream = stream or sys.stdin.buffer
     loop = asyncio.get_running_loop()
-    queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+    queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=MAX_BUFFERED_LINES)
+    slots = threading.BoundedSemaphore(MAX_BUFFERED_LINES)
+    closed = threading.Event()
 
-    def hand_off(item: bytes | None) -> None:
-        try:
-            loop.call_soon_threadsafe(queue.put_nowait, item)
-        except RuntimeError:
-            pass  # The event loop already closed.
+    def hand_off(item: bytes | None) -> bool:
+        # Reserve space before scheduling the callback so even the event loop's
+        # callback queue remains bounded while the protocol consumer is busy.
+        while not closed.is_set():
+            if not slots.acquire(timeout=0.25):
+                continue
+            try:
+                loop.call_soon_threadsafe(queue.put_nowait, item)
+            except RuntimeError:
+                return False  # The event loop already closed.
+            return True
+        return False
 
     def pump() -> None:
         try:
@@ -673,15 +690,23 @@ async def stdin_lines(stream=None) -> AsyncIterator[bytes]:
                 if len(line) > MAX_MESSAGE_BYTES and not line.endswith(b"\n"):
                     while (rest := stream.readline(65_536)) and not rest.endswith(b"\n"):
                         pass  # Discard the remainder; receive() reports the oversized message.
-                hand_off(line)
+                if not hand_off(line):
+                    return
         except (OSError, ValueError):
             pass
         finally:
             hand_off(None)
 
     threading.Thread(target=pump, name="rebound-mcp-stdin", daemon=True).start()
-    while (line := await queue.get()) is not None:
-        yield line
+    try:
+        while True:
+            line = await queue.get()
+            slots.release()
+            if line is None:
+                break
+            yield line
+    finally:
+        closed.set()
 
 
 def _claim_stdout():

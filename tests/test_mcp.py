@@ -355,6 +355,34 @@ async def test_cancelled_call_gets_no_response():
     assert [response["id"] for response in responses] == [2]
 
 
+async def test_duplicate_active_id_does_not_replace_cancellable_call():
+    server = mcp.McpServer(FakeService(delay=5))
+    duplicate, ping = await exchange(
+        server,
+        call(1, "check_readiness"),
+        call(1, "check_readiness"),
+        {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 1}},
+        rpc(2, "ping"),
+    )
+    assert duplicate["id"] is None and duplicate["error"]["code"] == mcp.INVALID_REQUEST
+    assert ping["id"] == 2
+
+
+async def test_readiness_burst_is_bounded_before_service_dispatch(monkeypatch):
+    monkeypatch.setattr(mcp, "MAX_INFLIGHT_CALLS", 2)
+    service = FakeService(delay=0.01)
+    responses = await exchange(mcp.McpServer(service), *(call(n, "check_readiness") for n in range(4)))
+    assert {reply["id"] for reply in responses if reply["result"]["isError"]} == {2, 3}
+    assert len(service.calls) == 2
+
+
+async def test_unknown_argument_names_do_not_reflect_sensitive_urls():
+    server = mcp.McpServer(FakeService())
+    result = await call_result(server, "check_readiness", {"https://secret.example/rpc/token": True})
+    assert result["isError"] is True
+    assert "secret.example" not in result["content"][0]["text"]
+
+
 async def test_slow_calls_time_out_as_tool_errors_and_do_not_block_others():
     slow = mcp.McpServer(FakeService(delay=5), call_timeout=0.05)
     result = await call_result(slow, "find_unfinished_transfers", {"wallet": WALLET})
