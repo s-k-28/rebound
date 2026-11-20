@@ -8,6 +8,16 @@ Read the [PRD](docs/PRD.md), [implementation and release plan](docs/superpowers/
 
 ![Rebound transfer workspace showing labeled synthetic examples](docs/images/workspace.jpg)
 
+## How Rebound works
+
+![Where USDC gets stuck: CCTP burns on Base, Circle attests, and the Arc mint is never submitted when the session is lost](docs/images/devpost/08-where-usdc-gets-stuck.png)
+
+![How Rebound decides: discover burns by address, verify the canonical source receipt, match Circle's signed message, read Arc nonce state, then finish with a verified receipt](docs/images/devpost/09-how-rebound-decides.png)
+
+![Live testnet run on November 20: 1 USDC burned at 06:43:33 UTC, found from the wallet address, minted on Arc at 06:45:12 UTC, second attempt refused](docs/images/devpost/10-live-run.png)
+
+![Status map: Source confirming, Waiting for Circle, Ready to finish and Completed, plus every other outcome with its next step](docs/images/devpost/11-status-map.png)
+
 ## QuickNode Streams integration
 
 Rebound integrates QuickNode Streams to help users find interrupted USDC transfers with just a public wallet address. A configured Stream can monitor Base Sepolia for Circle CCTP V2 USDC burn events and send matching events to Rebound’s authenticated webhook. Independent observation of a real burn arriving from the provider remains pending.
