@@ -15,6 +15,24 @@ Use the controlled testnet recording when the complete workflow is verified. The
 
 The recording uses [the public sample](VALIDATION.md#reproduce-the-read-only-check) and its [Arc receipt](https://explorer.testnet.arc.io/tx/0xd2f74e876f5f9b48ca5836044d0b1fa9723de30672587aacb86b55be6d5bdb00).
 
+## Four-minute finalist pitch
+
+| Time | What to show |
+|---|---|
+| 0:00–0:40 | Open a fresh inbox and explain why the wallet address survives when a bridge session or burn hash is lost. Show the fixed 200-block range as the search begins. |
+| 0:40–1:20 | Select the original 1-USDC burn. Point to its canonical Base receipt, exact log index, fixed recipient, and the matching signed Circle message. |
+| 1:20–2:25 | Replay the historical mint. Walk through the unused nonce and successful simulation at Arc block 73,127,413. Open the confirmed receipt for the consumed nonce at block 73,127,414. |
+| 2:25–3:15 | Read the 0.99987 USDC mint and 0.00013 USDC attested fee from the case. Explain that the caller pays Arc gas separately. Show the exact case link a support operator can recheck. |
+| 3:15–4:00 | Show the public repository and release limits. Summarize where the next iteration adds value through broader wallet history and a repeatable controlled testnet recovery. |
+
+**How does Rebound avoid a second transfer?** It targets the existing CCTP message. Arc’s MessageTransmitterV2 records a consumed nonce after delivery, and Rebound checks it during inspection and again before preparing recovery.
+
+**Who can receive the USDC?** The signed message fixes the mint recipient. The original message can also restrict the destination caller. For app-managed forwarding, the receipt proves the CCTP mint to the encoded recipient and the original app handles downstream actions.
+
+**Why Arc?** The contract the product checks and calls for settlement is on Arc. The review expresses the caller’s gas budget in native testnet USDC separately from the message’s attested fee.
+
+**What does the recorded example prove?** It shows a real receipt and a successful simulation against historical Arc state. Record a controlled testnet burn and mint separately before claiming Rebound completed a new recovery.
+
 ## Controlled testnet preparation
 
 1. Run the app using the README. Check the configured Base Sepolia and Arc Testnet RPCs, chain IDs, Circle contracts and Circle sandbox availability.
